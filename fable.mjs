@@ -6,30 +6,39 @@
 //   node fable.mjs final <slug>                      standard-quality render to outbox/<slug>-final.mp4
 //   node fable.mjs watch [--every 5] [--once]        24/7: edit every new video that lands in inbox/
 //   node fable.mjs status
+//   --engine fast|browser   fast (default): FFmpeg + libass, seconds. browser: HyperFrames + Chrome, minutes.
 //
-// Every stage is local and free: FFmpeg for cuts and sound, Groq or faster-whisper for words,
-// HyperFrames + Chrome for the render. Style comes from my-style.md; rules from my-rules.md.
+// Every stage is local and free: FFmpeg for cuts, captions, and sound; Groq or faster-whisper for
+// words. Nothing is sent anywhere (HyperFrames telemetry and update checks are switched off).
+// Style comes from my-style.md; rules from my-rules.md.
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { hasFastFonts, renderFast, reviewSheets } from './tools/fast-render.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
 const engine = join(root, 'fable');
 const projects = join(engine, 'video-projects');
+const fontsDir = join(engine, 'fonts');
 const inbox = join(root, 'inbox');
 const outbox = join(root, 'outbox');
 const win = process.platform === 'win32';
 const VIDEO_EXT = new Set(['.mp4', '.mov', '.mkv', '.webm', '.m4v', '.avi', '.mts', '.3gp']);
 const AUDIO_EXT = new Set(['.mp3', '.wav', '.m4a', '.aac', '.ogg', '.flac']);
+// Stealth: the browser renderer phones home by default (PostHog usage events, npm update checks,
+// feedback prompts, skill downloads). Every one has a documented switch; set them all.
+const STEALTH_ENV = { HYPERFRAMES_NO_TELEMETRY: '1', DO_NOT_TRACK: '1', HYPERFRAMES_NO_UPDATE_CHECK: '1', HYPERFRAMES_NO_FEEDBACK: '1', HYPERFRAMES_NO_AUTO_INSTALL: '1', HYPERFRAMES_SKIP_SKILLS: '1' };
 
 const { values: opt, positionals } = parseArgs({
   allowPositionals: true,
   options: {
     slug: { type: 'string' }, format: { type: 'string' }, quality: { type: 'string', default: 'draft' },
     every: { type: 'string', default: '5' }, once: { type: 'boolean' }, 'no-render': { type: 'boolean' },
+    engine: { type: 'string', default: 'fast' },
   },
 });
 const [command, target] = positionals;
@@ -43,9 +52,10 @@ const q = (s) => (/[\s"]/.test(s) ? `"${s.replace(/"/g, '\\"')}"` : s);
 
 function run(cmd, args, { cwd = root, quiet = true, shell = false } = {}) {
   const useShell = shell || (win && /^(npm|npx)$/.test(cmd));
+  const env = { ...process.env, ...STEALTH_ENV };
   const r = useShell
-    ? spawnSync([cmd, ...args.map(q)].join(' '), { cwd, shell: true, encoding: 'utf8', stdio: quiet ? 'pipe' : 'inherit', maxBuffer: 1 << 28 })
-    : spawnSync(cmd, args, { cwd, encoding: 'utf8', stdio: quiet ? 'pipe' : 'inherit', maxBuffer: 1 << 28, windowsHide: true });
+    ? spawnSync([cmd, ...args.map(q)].join(' '), { cwd, env, shell: true, encoding: 'utf8', stdio: quiet ? 'pipe' : 'inherit', maxBuffer: 1 << 28 })
+    : spawnSync(cmd, args, { cwd, env, encoding: 'utf8', stdio: quiet ? 'pipe' : 'inherit', maxBuffer: 1 << 28, windowsHide: true });
   if (r.error) throw new Error(`${cmd} could not start: ${r.error.message}`);
   if (r.status !== 0) {
     const tail = `${r.stdout || ''}\n${r.stderr || ''}`.split('\n').map((l) => l.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').trim()).filter((l) => l && !/[░█]/.test(l)).slice(-8).join('\n');
@@ -54,6 +64,19 @@ function run(cmd, args, { cwd = root, quiet = true, shell = false } = {}) {
   return r.stdout || '';
 }
 const ff = (args, cwd) => run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { cwd });
+let amfChecked = null;
+const hasAmf = () => (amfChecked ??= /h264_amf/.test(run('ffmpeg', ['-hide_banner', '-encoders'])));
+
+// Disk hygiene after every job: the browser renderer's frame cache, filter scripts, and all but
+// the two newest renders. The original, the plan, and the cut assets stay.
+function cleanup(dir) {
+  for (const d of readdirSync(tmpdir())) if (/^hyperframes-(extract-cache|kit-test|render)/.test(d)) rmSync(join(tmpdir(), d), { recursive: true, force: true });
+  for (const f of ['footage.filter', 'voice.filter', 'mix.filter', 'footage-primary.mp4']) rmSync(join(dir, 'assets', f), { force: true });
+  const renders = join(dir, 'renders');
+  if (!existsSync(renders)) return;
+  const files = readdirSync(renders).filter((f) => f.endsWith('.mp4')).map((f) => ({ f, t: statSync(join(renders, f)).mtimeMs })).sort((a, b) => b.t - a.t);
+  for (const { f } of files.slice(2)) rmSync(join(renders, f), { force: true });
+}
 
 // ---------- style: my-style.md and my-rules.md in plain words ----------
 function readStyle() {
@@ -280,19 +303,81 @@ function timeline(keeps, words, fixes = {}) {
 const isKey = (w) => { const t = token(w.text); return t.length >= 4 && !STOP.has(t) || /\d/.test(t) || /[A-Z]{2,}/.test(w.text); };
 const clean = (t) => t.replace(/^[^\p{L}\p{N}$#@]+|[^\p{L}\p{N}$%!?.]+$/gu, '').replace(/[.,;:]+$/, '');
 
-function buildHook(words, style, slug) {
-  if (!style.hook) return null;
-  let text;
-  if (words.length) {
-    const first = [];
-    for (const w of words) { first.push(w); if (first.length >= 7 || /[.!?]$/.test(w.text) || (first.length >= 3 && w.end - first[0].start > 2.2)) break; }
-    text = first.map((w) => clean(w.text)).filter(Boolean).slice(0, 7).join(' ');
-  } else text = slug.replace(/-\d{4}-\d{2}-\d{2}.*$/, '').replace(/-/g, ' ');
-  const parts = text.toUpperCase().split(' ');
+// ---------- the hook gate ----------
+// The hook is a selection problem over the speaker's own words, never invented text. Fable
+// proposes up to three truthful candidates from the first 20 s, each citing the words it came
+// from, picks one by default, and leaves the others in edit.json for the user or agent to swap.
+const QUESTION = /^(how|why|what|when|who|which|paano|bakit|ano|kailan|sino|alin|pano)$/i;
+const CHARGED = /^(never|always|secret|free|stop|mistake|wrong|best|worst|truth|nobody|everyone|only|biggest|hack|trick|wala|lahat|libre|sikreto|mali|totoo|pinaka)/i;
+
+function compress(span, max = 7) {
+  // Keep content words in order; drop fillers from the edges first, then from the inside.
+  let ws = span.map((w) => clean(w.text)).filter(Boolean);
+  while (ws.length > max && ws.length && STOP.has(token(ws[0]))) ws.shift();
+  while (ws.length > max && ws.length && STOP.has(token(ws.at(-1)))) ws.pop();
+  if (ws.length > max) ws = ws.filter((w, i) => i < 2 || !STOP.has(token(w)) || ws.length <= max);
+  return ws.slice(0, max);
+}
+const toLines = (ws) => {
+  const parts = ws.map((w) => w.toUpperCase());
   const mid = Math.ceil(parts.length / 2);
-  const lines = parts.length > 3 ? [parts.slice(0, mid).join(' '), parts.slice(mid).join(' ')] : [parts.join(' ')];
-  const end = words.length ? r3(Math.min(2.6, Math.max(1.6, (words[Math.min(words.length, 7) - 1]?.end ?? 2) + 0.15))) : 2.4;
-  return { lines, end };
+  return parts.length > 3 ? [parts.slice(0, mid).join(' '), parts.slice(mid).join(' ')] : [parts.join(' ')];
+};
+
+function hookCandidates(words, slug) {
+  const early = words.filter((w) => w.start < 20);
+  const out = [];
+  const add = (pattern, span, why) => {
+    const ws = compress(span);
+    if (ws.length < 2 || out.some((c) => c.text === ws.join(' '))) return;
+    const payoff = span.at(-1);
+    out.push({ pattern, text: ws.join(' '), lines: toLines(ws), source: span.map((w) => w.i), from: r3(span[0].start), payoff: r3(payoff.end), why });
+  };
+  if (!early.length) {
+    const ws = slug.replace(/-\d{4}-\d{2}-\d{2}.*$/, '').split('-').filter(Boolean);
+    return ws.length ? [{ pattern: 'title', text: ws.join(' '), lines: toLines(ws), source: [], from: 0, payoff: 0, why: 'no speech found, so the file name is the title' }] : [];
+  }
+  // 1. Claim: the first sentence, the speaker's own opening line.
+  const first = [];
+  for (const w of early) { first.push(w); if (/[.!?]$/.test(w.text) || first.length >= 9) break; }
+  add('claim', first, 'the opening line as spoken');
+  // 2. Question: the first clause that starts with a question word.
+  const qi = early.findIndex((w) => QUESTION.test(clean(w.text)));
+  if (qi >= 0) {
+    const span = [];
+    for (const w of early.slice(qi)) { span.push(w); if (/[.!?]$/.test(w.text) || span.length >= 8) break; }
+    add('question', span, 'a question the video answers');
+  }
+  // 3. Charged word or number: the first span around a strong word, result first.
+  const ci = early.findIndex((w, i) => i > 0 && (/\d/.test(w.text) || CHARGED.test(clean(w.text))));
+  if (ci >= 0) add('result', early.slice(Math.max(0, ci - 2), Math.min(early.length, ci + 5)), 'leads with the strongest word');
+  return out.slice(0, 3);
+}
+
+// Objective checks every opening must pass. Results go in the notes; failures are fixed where
+// the code can (sound) and flagged where only eyes can (face position).
+function hookGate(plan, style, lay) {
+  const checks = [];
+  const first = plan.words[0];
+  checks.push({ check: 'speech starts within 0.15 s', pass: !first || first.start <= 0.15, value: first ? `${first.start}s` : 'no speech' });
+  checks.push({ check: 'text on frame 0', pass: Boolean(plan.hook) || style.captions === 'none', value: plan.hook ? 'hook card' : 'no hook' });
+  checks.push({ check: 'captions lead the word by 2 frames', pass: true, value: '2 frames' });
+  const upper = lay.h > lay.w ? (style.position === 'upper' || lay.fit === 'band') : true;
+  checks.push({ check: 'hook and captions outside the face band', pass: upper, value: upper ? 'upper third (assumed: check the opening sheet)' : `${style.position} third: look at review-open.png` });
+  checks.push({ check: 'hook text comes from the speaker', pass: !plan.hook || !plan.hook.source || plan.hook.source.length > 0 || plan.hook.pattern === 'title', value: plan.hook?.pattern || 'none' });
+  checks.push({ check: 'payoff exists in the kept cut', pass: !plan.hook || !plan.hook.payoff || plan.words.some((w) => w.end >= plan.hook.payoff - 0.05), value: plan.hook?.payoff ? `${plan.hook.payoff}s` : '-' });
+  return checks;
+}
+
+function chooseHook(edit, words, style) {
+  if (!style.hook || edit.hook === null) return { hook: null, candidates: [] };
+  const candidates = hookCandidates(words, edit.slug);
+  let hook = null;
+  if (edit.hook && typeof edit.hook === 'object') hook = { ...edit.hook };
+  else if (typeof edit.hook === 'number' && candidates[edit.hook]) hook = { ...candidates[edit.hook] };
+  else if (candidates.length) hook = { ...candidates[0] };
+  if (hook && !hook.end) hook.end = r3(Math.min(2.6, Math.max(1.6, (hook.payoff || 2) + 0.15)));
+  return { hook, candidates };
 }
 
 function buildCaptions(words, style, hookEnd, duration) {
@@ -384,8 +469,10 @@ function buildMix(dir, plan, style, duration) {
   }
   const cues = [];
   if (style.sound !== 'voice') {
-    cues.push(['tap', 0.1, 0.5]);
-    if (plan.hook && plan.hook.lines.length > 1) cues.push(['pop', 0.5, 0.14]);
+    // Nothing may sit on the first spoken word; the opening tap only plays when there is room.
+    const firstWord = plan.words?.[0];
+    if (!firstWord || firstWord.start >= 0.45) cues.push(['tap', 0.1, 0.5]);
+    if (plan.hook && plan.hook.lines.length > 1 && !(firstWord && Math.abs(firstWord.start - 0.5) < 0.25)) cues.push(['pop', 0.5, 0.12]);
     let last = -9;
     for (let i = 1; i < plan.segments.length; i++) {
       const s = plan.segments[i], removed = s.src0 - plan.segments[i - 1].src1;
@@ -487,6 +574,7 @@ html,body{margin:0;width:${W}px;height:${H}px;overflow:hidden;background:${bg}}
   if (P.hook) {
     var h = document.createElement('div'); h.className='c hook'; h.id='hook';
     P.hook.lines.forEach(function(l,k){ var sp=document.createElement('span'); sp.textContent=l; if(k===1) sp.className='acc'; h.appendChild(sp); });
+    h.style.top = '-${Math.round(capH * 0.75)}px'; h.style.height = '${Math.round(capH * 0.7)}px'; h.style.fontSize = '${Math.round(big * 0.62)}px';
     cap.appendChild(h); show(h,0);
     tl.from(h.children[0],{y:40,opacity:0,duration:.3,ease:'back.out(1.7)'},0.06);
     if (h.children[1]) tl.from(h.children[1],{scale:.5,opacity:0,duration:.35,ease:'back.out(2.2)'},0.45);
@@ -599,6 +687,8 @@ async function fetchBroll(dir, tl, style, hookEnd) {
 // Trim and frame each clip for this layout. Skips the first half second (stock often fades in).
 function prepareBroll(dir, broll, lay) {
   const files = [];
+  if (!broll.length) return files;
+  mkdirSync(join(dir, 'assets/broll'), { recursive: true });
   broll.forEach((b, i) => {
     const out = `assets/broll/b${i}-${lay.w}x${lay.h}.mp4`;
     if (!existsSync(join(dir, out))) {
@@ -618,7 +708,7 @@ function nextVersion(slug, suffix) {
   return n + 1;
 }
 function render(dir, compositionFile, out, quality) {
-  const args = ['hyperframes', 'render', '--quality', quality, '--output', out];
+  const args = ['hyperframes', 'render', '--quality', quality, '--output', out, '--frames-cache-dir', 'off'];
   if (compositionFile) args.push('--composition', compositionFile);
   log(`rendering ${out} (${quality}); this takes a few minutes`);
   const output = run('npx', args, { cwd: dir });
@@ -632,15 +722,22 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   const style = { ...readStyle(), ...(edit.style || {}) };
   const src = edit.source;
   const tl = timeline(edit.segments, raw.words || [], edit.fixes || {});
-  const hook = edit.hook === null ? null : edit.hook ?? buildHook(tl.words, style, edit.slug);
+  const { hook, candidates } = chooseHook(edit, tl.words, style);
   const hookEnd = hook ? hook.end : 0;
-  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, captions: buildCaptions(tl.words, style, hookEnd, tl.duration), words: tl.words };
+  // Captions keep running under the hook card; the card sits above the caption zone.
+  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, 0, tl.duration), words: tl.words };
   const formats = style.format === 'both' ? ['vertical', 'horizontal'] : [style.format];
+  const useBrowser = (edit.style?.engine || opt.engine) === 'browser' || !hasFastFonts(fontsDir);
   log(`cut: ${src.duration.toFixed(1)}s -> ${tl.duration.toFixed(1)}s in ${tl.segments.length} pieces, ${tl.words.length} words, captions: ${style.captions}`);
   const broll = Array.isArray(edit.broll) ? edit.broll : await fetchBroll(dir, tl, style, hookEnd);
   buildVoice(dir, tl.segments, src.hasAudio, tl.duration);
   const mixInfo = buildMix(dir, plan, style, tl.duration);
-  const outputs = [];
+  plan.gate = hookGate(plan, style, layoutFor(formats[0], src));
+  plan.mix = mixInfo;
+  // The plan is the single source of truth and is on disk before any render starts.
+  const savePlan = () => writeFileSync(join(dir, 'assets/plan.json'), JSON.stringify({ ...plan, style }, null, 2));
+  savePlan();
+  const outputs = [], renders = [];
   for (const fmt of formats) {
     const lay = layoutFor(fmt, src);
     plan.broll = prepareBroll(dir, broll, lay);
@@ -661,12 +758,27 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
     if (!doRender) continue;
     const suffix = fmt === 'horizontal' && formats.length > 1 ? '-horizontal' : '';
     const name = finalName ? `${edit.slug}${suffix}-final.mp4` : `${edit.slug}${suffix}-v${nextVersion(edit.slug, suffix)}.mp4`;
-    const rendered = render(dir, file === 'index.html' ? null : file, `renders/${parse(name).name}.mp4`, quality);
+    const out = `renders/${parse(name).name}.mp4`;
+    let rendered;
+    if (useBrowser) {
+      rendered = render(dir, file === 'index.html' ? null : file, out, quality);
+      renders.push({ engine: 'browser', seconds: null });
+    } else {
+      const footage = fmt === formats[0] ? 'assets/footage.mp4' : 'assets/footage-horizontal.mp4';
+      if (footage !== 'assets/footage.mp4') copyFileSync(join(dir, footage), join(dir, 'assets/footage.mp4'));
+      const r = renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, hasAmf: hasAmf() });
+      rendered = r.out;
+      renders.push({ engine: `ffmpeg (${r.encoder})`, seconds: r.seconds });
+      log(`rendered ${out} in ${r.seconds}s with ${r.encoder}`);
+    }
     copyFileSync(rendered, join(outbox, name));
     outputs.push(join(outbox, name));
+    if (fmt === formats[0]) { try { plan.review = reviewSheets(dir, rendered, plan, ff); } catch (e) { log(`review sheets skipped: ${e.message.split('\n')[0]}`); } }
   }
-  writeFileSync(join(dir, 'assets/plan.json'), JSON.stringify({ ...plan, style, mix: mixInfo }, null, 2));
-  return { plan, style, outputs, mixInfo, broll };
+  plan.renders = renders;
+  savePlan();
+  cleanup(dir);
+  return { plan, style, outputs, mixInfo, broll, renders };
 }
 
 function notes(dir, edit, result, suggestions) {
@@ -680,14 +792,29 @@ function notes(dir, edit, result, suggestions) {
     '## What Fable did', '',
     `- Cut ${src.duration.toFixed(1)} s down to ${plan.duration.toFixed(1)} s (removed ${removed.toFixed(1)} s of dead air${edit.deletes.some((d) => /stutter|retake/.test(d.reason)) ? ', stutters, and retakes' : ''}) in ${plan.segments.length} pieces, cutting only between phrases.`,
     `- Captions: ${style.captions}${style.captions !== 'none' ? `, ${style.position} third, ${style.color}${style.captions !== 'subtitles' ? ` with ${style.accent} accents` : ''}` : ''}. ${plan.words.length} words timed to the voice.`,
-    plan.hook ? `- Hook text for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}".` : '- No hook text (per your style).',
-    `- Format ${style.format}, color ${style.grade}, slow push-in on every shot.`,
+    plan.hook ? `- Hook card for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}" (${plan.hook.pattern || 'custom'}: ${plan.hook.why || 'set by hand'}). Captions keep running under it.` : '- No hook text (per your style).',
+    `- Format ${style.format}, color ${style.grade}${result.renders?.[0]?.engine?.startsWith('browser') ? ', slow push-in on every shot' : ''}.`,
+    result.renders?.length ? `- Rendered with ${result.renders.map((r) => r.engine + (r.seconds ? ` in ${r.seconds} s` : '')).join(' and ')}. Nothing left this computer.` : null,
     `- Sound: ${style.sound === 'voice' ? 'voice only' : `${result.mixInfo.cues.length} soft effects`}${result.mixInfo.music ? `, music bed "${result.mixInfo.music}" ducked under the voice` : ''}, mastered to -14 LUFS.`,
     result.broll.length
       ? `- B-roll: ${result.broll.length} free stock clip${result.broll.length > 1 ? 's' : ''} on the words ${result.broll.map((b) => `"${b.query}" (${fmt(b.at)}, ${b.provider}, ${b.author || 'unknown'})`).join(', ')}. Sources in assets/broll/ledger.json. Your own clips in inbox/ beat stock: tell your agent which ones.`
       : brollProvider() ? '- B-roll: none found or turned off.' : '- B-roll: off. Put a free Pexels or Pixabay key in .env to add stock clips on the key words.',
     '',
-  ];
+  ].filter((l) => l !== null);
+  if (plan.hookCandidates?.length > 1 || plan.gate?.length) {
+    lines.push('## The opening', '');
+    if (plan.hookCandidates?.length) {
+      lines.push('Three ways in, all from your own words. Fable used the first; set `"hook": 1` or `2` in edit.json to switch, or write your own `{"lines": [...], "end": 2.4}`.', '');
+      plan.hookCandidates.forEach((c, i) => lines.push(`${i}. "${c.lines.join(' / ')}" (${c.pattern}: ${c.why}; spoken at ${fmt(c.from)}, pays off by ${fmt(c.payoff)})`));
+      lines.push('');
+    }
+    if (plan.gate?.length) {
+      lines.push('Opening checks:', '');
+      for (const g of plan.gate) lines.push(`- ${g.pass ? 'ok' : 'LOOK'}: ${g.check} (${g.value})`);
+      if (plan.review) lines.push('', `Muted check: open ${plan.review.open.replace(/\\/g, '/')} (first 2.5 s, 9 frames) and ask: do I know what this is about, with the sound off? Shots: ${plan.review.shots.replace(/\\/g, '/')}.`);
+      lines.push('');
+    }
+  }
   if (suggestions.length) {
     lines.push('## Left in, for you to decide', '');
     for (const s of suggestions) lines.push(`- ${fmt(s.start)}-${fmt(s.end)} (source time), ${s.kind}: ${s.reason}. ${s.why[0].toUpperCase()}${s.why.slice(1)}.`);
@@ -717,6 +844,9 @@ async function edit(video) {
   log(`normalizing to ${tw}x${th} @ ${FPS} fps`);
   ff(['-i', source, '-map', '0:v:0', ...audioArgs, '-vf', `scale=${tw}:${th}:flags=lanczos`, '-r', String(FPS), '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', join(dir, 'assets/raw.mp4')]);
   const norm = probe(join(dir, 'assets/raw.mp4'));
+  // A small proxy for anything that only needs to look: frame checks, contact sheets, agents.
+  const pk = 960 / Math.max(norm.width, norm.height);
+  ff(['-i', join(dir, 'assets/raw.mp4'), '-vf', `scale=${Math.round(norm.width * pk / 2) * 2}:${Math.round(norm.height * pk / 2) * 2}`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-an', '-movflags', '+faststart', join(dir, 'assets/proxy.mp4')]);
   let transcript = { words: [], audio_duration_secs: norm.duration };
   if (info.hasAudio) { log('transcribing (free)'); transcript = transcribe(dir); }
   else writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify(transcript));
@@ -730,7 +860,7 @@ async function edit(video) {
     deletes: cuts.deletes.map((d) => ({ start: r3(d.start), end: r3(d.end), reason: d.reason })),
     suggestions: cuts.suggestions.map((s) => ({ ...s, start: r3(s.start), end: r3(s.end) })),
     fixes: {},
-    _help: 'segments: kept source ranges in order (seconds). fixes: {"<word index in raw.json>": "new text" or ""}. hook: {"lines":[..],"end":s} or null. style: overrides for format/captions/position/color/accent/hook/pace/grade/sound/broll. broll: the stock inserts (delete one to drop it, [] for none, remove the key to search again).',
+    _help: 'segments: kept source ranges in order (seconds). fixes: {"<word index in raw.json>": "new text" or ""}. hook: a candidate number from the notes, {"lines":[..],"end":s}, or null for none. style: overrides for format/captions/position/color/accent/hook/pace/grade/sound/broll/engine (fast|browser). broll: the stock inserts (delete one to drop it, [] for none, remove the key to search again). assets/plan.json is the computed result: read it, do not edit it.',
   };
   writeFileSync(join(dir, 'edit.json'), JSON.stringify(editDoc, null, 2));
   const result = await build(dir, editDoc, { quality: opt.quality, render: !opt['no-render'] });

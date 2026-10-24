@@ -112,17 +112,23 @@ API). The default is to use none of them.
    renders a draft, and writes `outbox/<slug>-v1.mp4` and `outbox/<slug>-notes.md`. The whole edit is in
    `fable/video-projects/<slug>/edit.json`. A render takes a few minutes; run it in the
    background if your agent supports that.
-3. Read the notes file. Watch the draft yourself if your agent can view video, or at least
-   extract and look at a few frames (first second, a cut, the end) with FFmpeg. Fix anything
-   obviously wrong (a caption over the mouth, a cut inside a word) by editing `edit.json` and
-   running `node fable.mjs rebuild <slug>`.
+3. Read the notes file, then look at the two review sheets it names: `assets/review-open.png`
+   (the first 2.5 s, nine frames) and `assets/review-shots.png` (one frame per shot). Judge the
+   opening with the sound off: is it clear what the video is about? Is any text over the
+   mouth? The notes list up to three hook candidates taken from the speaker's own words and
+   the opening checks; switch with `"hook": 1` in `edit.json` if another candidate is
+   stronger, or write your own lines, always from what was actually said. Fix anything wrong
+   (a caption over the mouth, a cut inside a word) in `edit.json` and run
+   `node fable.mjs rebuild <slug>`.
 4. Make it better than the autopilot alone when the footage deserves it: read `fable/AGENTS.md`
    and the engine skill `short-form-edit` (vertical or under 3 minutes) or `edit-video` (long
    horizontal). Add motion cards, B-roll from extra clips in `inbox/` that the user calls
    B-roll, zoom-ins on the key line, and a payoff, directly in the project's `index.html`
    (it is a normal HyperFrames composition; `assets/plan.json` has every word, segment, and
-   caption on the final timeline). Render with `npx hyperframes render --quality draft` from
-   the project folder and copy to `outbox/<slug>-v2.mp4`. Rules beat style; style beats the
+   caption on the final timeline). That path renders in Chrome and takes minutes:
+   `node fable.mjs rebuild <slug> --engine browser`, or `npx hyperframes render --quality
+   draft --frames-cache-dir off` from the project folder, then copy to `outbox/<slug>-v2.mp4`.
+   Use it only when the video needs motion graphics; plain captions never need it. Rules beat style; style beats the
    engine's house style. Never download music or footage you have no right to use.
 5. Open the draft. Tell the user in 3 to 5 short bullets what you did (the notes file has the
    numbers), list anything the autopilot left in for them to decide, then ask for notes.
@@ -138,8 +144,8 @@ API). The default is to use none of them.
   (for example "Captions: lower third" or "Hook: never") plus the user's exact words and the
   date. Confirm in one line: "Saved as a rule: ...". Never write rules into `fable/`.
 - When the user approves ("ok na", "approved", "final"), run `node fable.mjs final <slug>`
-  (standard quality, `outbox/<slug>-final.mp4`). If you changed `index.html` by hand, render
-  that instead with `npx hyperframes render --quality standard` and copy it to the same name.
+  (standard quality, `outbox/<slug>-final.mp4`). If you changed `index.html` by hand, add
+  `--engine browser` so your graphics are in the final.
 - "Horizontal version" or "for YouTube": set `"style": {"format": "horizontal"}` in `edit.json`
   and rebuild; Fable composes 1920x1080 with its own framing and text placement, not a crop.
   Then refine as in step 4 if needed.

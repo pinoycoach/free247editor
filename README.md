@@ -6,7 +6,8 @@ A free, private video editor that runs on your own computer, 24/7, inside your A
 agent or on its own. Formerly free247editor.
 
 Drop a raw video in the inbox. A minute or two later a cut, captioned, mixed draft is in the
-outbox, with notes on what was done. Give notes in plain words (English, Tagalog, Taglish),
+outbox, with notes on what was done. Captions and the hook are drawn by FFmpeg, so a draft
+renders in seconds on a plain laptop. Give notes in plain words (English, Tagalog, Taglish),
 the way you would to a human editor. Lasting notes become rules it follows on every future
 edit, so it learns your style. Nothing is uploaded anywhere.
 
@@ -82,13 +83,14 @@ YouTube and it gets its own framing and text placement.
 | --- | --- |
 | Cuts | Removes dead air, stutters, and clear retakes, cutting only between phrases at real silence, frame-aligned so lips stay in sync |
 | Captions | Word by word, bold key words, key-word pills, or subtitles, in your position and colors, timed to each word |
-| Hook | Big two-line text in the first seconds, built from your first sentence, if you want it |
+| Hook | Up to three openings taken from your own words (claim, question, strongest word), one chosen, all listed in the notes with objective checks and a nine-frame muted-view sheet |
 | B-roll | Optional: free stock clips from Pixabay or Pexels cut in on the key words, every source logged; your own extra clips win |
 | Camera | A slow push-in on every shot; landscape clips get a glowing band layout in vertical |
 | Color | Natural, warm, cool, black and white, or orange and teal |
 | Sound | Soft taps and clicks on real cuts, a music bed from `my-sounds` ducked under your voice, mastered to -14 LUFS |
 | Judgment | Doubtful cuts are left in and listed in the notes for you to decide |
-| Agent extras | Motion cards, B-roll, zoom-ins, payoffs, built on the same timeline (`plan.json`) |
+| Agent extras | Motion cards, B-roll, zoom-ins, payoffs, built on the same timeline (`plan.json`) and rendered through Chrome only when asked |
+| Private | No telemetry, no update checks, no uploads; the render cache is off and temp files are cleaned after every job |
 | Learning | Your notes are saved as rules in `my-rules.md` and applied every time |
 | 24/7 | `node fable.mjs watch` edits everything that lands in the inbox |
 
@@ -108,7 +110,8 @@ YouTube and it gets its own framing and text placement.
   sandbox by default, so approve network access when setup or transcription asks.
 - About 1 GB of disk space.
 
-Tested on Windows 11 with Claude Code (setup, autopilot edit and render, transcription). The
+Tested on Windows 11 with Claude Code (setup, autopilot edit and render, transcription). A 44 s
+vertical draft renders in about 12 s with the AMD encoder on a Ryzen 3 laptop. The
 other agents read the same standard files but are not tested yet. The engine is
 cross-platform, so macOS and Linux should work, but they are not tested yet either.
 

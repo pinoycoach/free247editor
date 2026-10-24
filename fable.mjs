@@ -397,9 +397,18 @@ function buildCaptions(words, style, hookEnd, duration) {
   const lead = 2 / FPS;
   const visible = words.filter((w) => w.start >= hookEnd - 0.05 && clean(w.text));
   if (style.captions === 'word') {
-    const caps = visible.map((w) => ({ kind: 'word', text: clean(w.text).toUpperCase(), start: r3(Math.max(hookEnd, w.start - lead)), key: isKey(w) }));
+    const single = visible.map((w) => ({ kind: 'word', text: clean(w.text).toUpperCase(), start: r3(Math.max(hookEnd, w.start - lead)), end: w.end, key: isKey(w) }));
+    // Fast runs ("the name of the") would flash for a tenth of a second each. Group words that
+    // are spoken faster than a reader can take them, up to three per chunk, never across a pause.
+    const caps = [];
+    for (const w of single) {
+      const last = caps.at(-1);
+      const fast = last && w.start - last.lastStart < 0.28 && last.words < 3 && (last.text + ' ' + w.text).length <= 14 && !/[.!?]$/.test(last.raw);
+      if (fast) { last.text += ' ' + w.text; last.words++; last.lastStart = w.start; last.end = w.end; last.raw = w.text; last.key = last.key || w.key; continue; }
+      caps.push({ kind: 'word', text: w.text, start: w.start, end: w.end, key: w.key, words: 1, lastStart: w.start, raw: w.text });
+    }
     for (let i = 1; i < caps.length; i++) caps[i].start = r3(Math.max(caps[i].start, caps[i - 1].start + 0.15));
-    caps.forEach((c, i) => { c.end = r3(Math.min(i + 1 < caps.length ? caps[i + 1].start : duration, c.start + 0.9)); });
+    caps.forEach((c, i) => { c.end = r3(Math.min(i + 1 < caps.length ? caps[i + 1].start : duration, c.start + 0.9)); delete c.words; delete c.lastStart; delete c.raw; });
     return caps.filter((c) => c.end > c.start);
   }
   const max = style.captions === 'subtitles' ? 6 : 4;

@@ -82,6 +82,10 @@ Cover:
 - Graphics: minimal, some motion cards, or heavy motion graphics.
 - Color: natural, warm, cool, black and white, or orange and teal.
 - Sound: voice only, light sound effects, or sound effects plus a quiet music bed.
+- B-roll: none (default; stock on personal footage usually reads as stock), some stock
+  clips on the key words, or lots. Best for talking-head explainers with concrete nouns.
+  Stock needs a free key: Pixabay (https://pixabay.com/api/docs/, shown after sign-in) or
+  Pexels. Get it the same way as the Groq key, into `PIXABAY_API_KEY=` in `.env`.
 
 Write `my-style.md` as short plain bullets, one per choice, in the user's words where they
 gave them. The autopilot reads these lines by keyword, so keep the choice words in them
@@ -103,7 +107,9 @@ API). The default is to use none of them.
    video, transcribes for free, cuts dead air, stutters, and clear retakes between phrases at
    real silence, builds captions and the hook from `my-style.md` and `my-rules.md`, mixes soft
    effects (and a music bed from `my-sounds/` when the style asks), renders a draft, and
-   writes `outbox/<slug>-v1.mp4` and `outbox/<slug>-notes.md`. The whole edit is in
+   adds free stock B-roll on the concrete words when the style asks for it and `.env` has a
+   Pixabay or Pexels key,
+   renders a draft, and writes `outbox/<slug>-v1.mp4` and `outbox/<slug>-notes.md`. The whole edit is in
    `fable/video-projects/<slug>/edit.json`. A render takes a few minutes; run it in the
    background if your agent supports that.
 3. Read the notes file. Watch the draft yourself if your agent can view video, or at least

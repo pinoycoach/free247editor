@@ -59,7 +59,7 @@ const ff = (args, cwd) => run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '
 function readStyle() {
   const style = {
     format: 'vertical', captions: 'word', position: 'upper', color: '#ffffff', accent: '#facc15',
-    hook: true, pace: 'tight', graphics: 'some', grade: 'natural', sound: 'light', font: 'Montserrat',
+    hook: true, pace: 'tight', graphics: 'some', grade: 'natural', sound: 'light', font: 'Montserrat', broll: 'none',
   };
   const apply = (text) => {
     for (const raw of text.split(/\r?\n/)) {
@@ -106,6 +106,11 @@ function readStyle() {
         if (/voice only|no sound effects|no sfx|walang/.test(line)) style.sound = 'voice';
         else if (/music/.test(line) && !never) style.sound = 'music';
         else if (/light|some|sound effects|sfx/.test(line)) style.sound = 'light';
+      }
+      if (/b-?roll|stock (footage|clips?)/.test(line)) {
+        if (never) style.broll = 'none';
+        else if (/lots|heavy|marami|many|every/.test(line)) style.broll = 'lots';
+        else style.broll = 'some';
       }
       if (/\bfont\b/.test(line)) {
         const m = raw.match(/font[^:]*:\s*([A-Za-z][A-Za-z0-9 ]{2,30})/i);
@@ -434,6 +439,8 @@ html,body{margin:0;width:${W}px;height:${H}px;overflow:hidden;background:${bg}}
 #fw{position:absolute;left:${F.x}px;top:${F.y}px;width:${F.w}px;height:${F.h}px;overflow:hidden;${lay.fit !== 'cover' ? 'border-radius:22px;box-shadow:0 0 90px rgba(109,40,217,.35);' : ''}}
 #fw-inner{position:absolute;inset:0;transform-origin:50% 45%}
 #foot{position:absolute;inset:0;width:${F.w}px;height:${F.h}px;object-fit:cover}
+.bw{position:absolute;left:${F.x}px;top:${F.y}px;width:${F.w}px;height:${F.h}px;overflow:hidden;opacity:0;visibility:hidden;transform-origin:50% 50%;${lay.fit !== 'cover' ? 'border-radius:22px;' : ''}}
+.bw video{position:absolute;inset:0;width:${F.w}px;height:${F.h}px;object-fit:cover}
 #fade{position:absolute;left:0;top:0;width:${W}px;height:${Math.round(H * 0.4)}px;background:linear-gradient(rgba(0,0,0,.6),rgba(0,0,0,.35) 55%,rgba(0,0,0,0))}
 #cap{position:absolute;left:${capX}px;top:${capY}px;width:${capW}px;height:${capH}px}
 .c{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;opacity:0;visibility:hidden;
@@ -454,12 +461,13 @@ html,body{margin:0;width:${W}px;height:${H}px;overflow:hidden;background:${bg}}
     <video id="foot" data-start="0" data-duration="${D}" data-track-index="1" src="assets/footage.mp4" muted playsinline></video>
   </div></div>
   <audio id="mix" data-start="0" data-duration="${D}" data-track-index="2" src="assets/mix.wav" data-volume="1"></audio>
+  ${(plan.broll || []).map((b, i) => `<div class="bw" id="bw${i}"><video id="b${i}" data-start="${b.at}" data-duration="${b.duration}" data-track-index="${10 + i}" src="${b.file}" muted playsinline></video></div>`).join('\n  ')}
   ${fade ? `<div id="fade" class="clip" data-start="0" data-duration="${D}" data-track-index="3"></div>` : ''}
   <div id="cap" class="clip" data-start="0" data-duration="${D}" data-track-index="4"></div>
 </div>
 <script>
 (function(){
-  var P = ${JSON.stringify({ segments: plan.segments.map((s) => [s.out0, s.out1]), hook: plan.hook, captions: plan.captions, mode: style.captions })};
+  var P = ${JSON.stringify({ segments: plan.segments.map((s) => [s.out0, s.out1]), hook: plan.hook, captions: plan.captions, mode: style.captions, broll: (plan.broll || []).map((b) => [b.at, b.duration]) })};
   var tl = gsap.timeline({paused:true}), cap = document.getElementById('cap');
   // A slow push-in on every shot so nothing sits still; the origin alternates so cuts feel different.
   P.segments.forEach(function(s, i){
@@ -469,6 +477,13 @@ html,body{margin:0;width:${W}px;height:${H}px;overflow:hidden;background:${bg}}
   ${lay.fit !== 'cover' ? "tl.from('#fw',{y:50,opacity:0,duration:.45,ease:'power3.out'},0.05);" : ''}
   function show(el,t){ tl.set(el,{opacity:1,visibility:'visible'},t); }
   function hide(el,t){ tl.set(el,{opacity:0,visibility:'hidden'},t); }
+  // B-roll inserts: a hard cut in on the spoken word, a slow push while it holds, a hard cut out.
+  P.broll.forEach(function(b,i){
+    var el = document.getElementById('bw'+i); if (!el) return;
+    show(el,b[0]);
+    tl.fromTo(el,{scale:1.04},{scale:1.10,duration:b[1],ease:'none',immediateRender:false},b[0]);
+    hide(el,b[0]+b[1]);
+  });
   if (P.hook) {
     var h = document.createElement('div'); h.className='c hook'; h.id='hook';
     P.hook.lines.forEach(function(l,k){ var sp=document.createElement('span'); sp.textContent=l; if(k===1) sp.className='acc'; h.appendChild(sp); });
@@ -498,6 +513,103 @@ html,body{margin:0;width:${W}px;height:${H}px;overflow:hidden;background:${bg}}
 `;
 }
 
+// ---------- B-roll: free stock footage on the concrete words ----------
+// Pexels or Pixabay, whichever key is in .env. Both licenses allow use in your own videos,
+// commercial included, without attribution; every clip's source is still logged in the ledger.
+const BROLL_SKIP = new Set(['okay', 'yeah', 'right', 'thing', 'things', 'stuff', 'really', 'gonna', 'wanna', 'know', 'like', 'just', 'very', 'because', 'about', 'there', 'where', 'which', 'would', 'could', 'should', 'have', 'been', 'then', 'than', 'that', 'this', 'with', 'what', 'when', 'your', 'they', 'them', 'will', 'also', 'into', 'some', 'more', 'most', 'said', 'says', 'want', 'need', 'make', 'made', 'does', 'done', 'going', 'come', 'came', 'here', 'much', 'many', 'every', 'other', 'again', 'still', 'even', 'only', 'back', 'well', 'sure', 'kind', 'sort', 'mean', 'guys', 'ever', 'never', 'always', 'maybe', 'actually', 'basically', 'literally', 'something', 'anything', 'everything', 'nothing', 'someone', 'everyone', 'mommy', 'daddy', 'hello', 'okay', 'alright', 'tapos', 'kaya', 'naman', 'lang', 'ganun', 'ganito', 'yung', 'para', 'pero', 'hindi', 'wala', 'meron', 'dito', 'doon', 'sila', 'kami', 'tayo', 'nila', 'natin', 'namin', 'niya', 'nung']);
+const BROLL_INTERVAL = { some: 8, lots: 5 };
+
+function brollProvider() {
+  try { process.loadEnvFile(join(root, '.env')); } catch {}
+  if (process.env.PEXELS_API_KEY) return 'pexels';
+  if (process.env.PIXABAY_API_KEY) return 'pixabay';
+  return null;
+}
+
+async function searchStock(provider, query, vertical, word = query) {
+  const pick = (files) => {
+    // Smallest file that still fills the frame; portrait when the reel is portrait.
+    const ok = files.filter((f) => f.width && f.height && Math.min(f.width, f.height) >= 720);
+    const oriented = ok.filter((f) => vertical ? f.height > f.width : f.width >= f.height);
+    return (oriented.length ? oriented : ok).sort((a, b) => a.width * a.height - b.width * b.height)[0] || null;
+  };
+  if (provider === 'pexels') {
+    const u = new URL('https://api.pexels.com/videos/search');
+    u.search = new URLSearchParams({ query, orientation: vertical ? 'portrait' : 'landscape', size: 'medium', per_page: '8' });
+    const res = await fetch(u, { headers: { Authorization: process.env.PEXELS_API_KEY } });
+    if (!res.ok) throw new Error(`Pexels HTTP ${res.status}`);
+    for (const v of (await res.json()).videos || []) {
+      if (v.duration < 3) continue;
+      const f = pick(v.video_files || []);
+      if (f) return { provider, id: String(v.id), page: v.url, author: v.user?.name || '', download: f.link, width: f.width, height: f.height, license: 'Pexels License (free, no attribution required)' };
+    }
+    return null;
+  }
+  const u = new URL('https://pixabay.com/api/videos/');
+  u.search = new URLSearchParams({ key: process.env.PIXABAY_API_KEY, q: query, per_page: '8', safesearch: 'true' });
+  const res = await fetch(u);
+  if (!res.ok) throw new Error(`Pixabay HTTP ${res.status}`);
+  for (const h of (await res.json()).hits || []) {
+    // The clip must be tagged with the spoken word itself, not just rank for it.
+    if (h.duration < 3 || !(h.tags || '').toLowerCase().split(/,\s*/).some((tag) => tag.split(' ').includes(word) || tag === word)) continue;
+    const f = pick(Object.values(h.videos || {}).map((x) => ({ ...x, link: x.url })));
+    if (f) return { provider, id: String(h.id), page: h.pageURL, author: h.user || '', download: f.url, width: f.width, height: f.height, license: 'Pixabay Content License (free, no attribution required)' };
+  }
+  return null;
+}
+
+async function fetchBroll(dir, tl, style, hookEnd) {
+  const provider = brollProvider();
+  if (!provider || style.broll === 'none') return [];
+  const interval = BROLL_INTERVAL[style.broll] || BROLL_INTERVAL.some;
+  const hold = 2.0;
+  const used = new Set(), picks = [];
+  let last = hookEnd - interval + 1.2; // the first insert may come soon after the hook
+  for (const w of tl.words) {
+    const t = token(w.text);
+    // Only plain words: no contractions, numbers, names, or filler.
+    if (t.length < 4 || /['’\d]/.test(w.text) || /^[A-Z]/.test(w.text.trim()) && tl.words.indexOf(w) > 0 && !/[.!?]$/.test(tl.words[tl.words.indexOf(w) - 1].text) || STOP.has(t) || BROLL_SKIP.has(t) || used.has(t)) continue;
+    const at = r3(Math.max(hookEnd + 0.3, w.start - 0.08));
+    if (at - last < interval || at + hold > tl.duration - 1.5) continue;
+    used.add(t); last = at;
+    // Two words beat one: "clap hands" finds the action, "clap" finds anything.
+    const k = tl.words.indexOf(w), n = tl.words[k + 1], p = tl.words[k - 1];
+    const buddy = [n, p].find((x) => x && Math.abs(x.start - w.end) < 0.4 && !/['’\d]/.test(x.text) && token(x.text).length >= 3 && !STOP.has(token(x.text)) && !BROLL_SKIP.has(token(x.text)));
+    picks.push({ query: buddy ? (buddy === n ? `${t} ${token(buddy.text)}` : `${token(buddy.text)} ${t}`) : t, at, duration: hold, word: t });
+  }
+  const out = [], vertical = style.format !== 'horizontal';
+  mkdirSync(join(dir, 'assets/broll'), { recursive: true });
+  for (const p of picks) {
+    try {
+      const hit = await searchStock(provider, p.query, vertical, p.word) || (p.query !== p.word && await searchStock(provider, p.word, vertical, p.word));
+      if (!hit) { log(`b-roll: nothing usable for "${p.query}"`); continue; }
+      const src = join(dir, `assets/broll/${hit.provider}-${hit.id}.mp4`);
+      if (!existsSync(src)) {
+        const res = await fetch(hit.download);
+        if (!res.ok) throw new Error(`download HTTP ${res.status}`);
+        writeFileSync(src, Buffer.from(await res.arrayBuffer()));
+      }
+      out.push({ ...p, provider: hit.provider, id: hit.id, page: hit.page, author: hit.author, license: hit.license, src: basename(src) });
+      log(`b-roll: "${p.query}" at ${p.at}s from ${hit.provider} (${hit.author})`);
+    } catch (e) { log(`b-roll: "${p.query}" skipped: ${e.message.split('\n')[0]}`); }
+  }
+  return out;
+}
+
+// Trim and frame each clip for this layout. Skips the first half second (stock often fades in).
+function prepareBroll(dir, broll, lay) {
+  const files = [];
+  broll.forEach((b, i) => {
+    const out = `assets/broll/b${i}-${lay.w}x${lay.h}.mp4`;
+    if (!existsSync(join(dir, out))) {
+      ff(['-ss', '0.5', '-t', String(b.duration + 0.2), '-i', `assets/broll/${b.src}`, '-an', '-vf', `fps=${FPS},scale=${lay.foot.w}:${lay.foot.h}:force_original_aspect_ratio=increase:flags=lanczos,crop=${lay.foot.w}:${lay.foot.h},setsar=1,format=yuv420p`, '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-movflags', '+faststart', out], dir);
+    }
+    files.push({ ...b, file: out });
+  });
+  writeFileSync(join(dir, 'assets/broll/ledger.json'), JSON.stringify(files.map((f) => ({ query: f.query, at: f.at, duration: f.duration, provider: f.provider, id: f.id, page: f.page, author: f.author, license: f.license, file: f.file })), null, 2) + '\n');
+  return files;
+}
+
 // ---------- the pipeline ----------
 function nextVersion(slug, suffix) {
   mkdirSync(outbox, { recursive: true });
@@ -515,7 +627,7 @@ function render(dir, compositionFile, out, quality) {
   return join(dir, out);
 }
 
-function build(dir, edit, { quality = 'draft', render: doRender = true, finalName = false } = {}) {
+async function build(dir, edit, { quality = 'draft', render: doRender = true, finalName = false } = {}) {
   const raw = JSON.parse(readFileSync(join(dir, 'assets/raw.json'), 'utf8'));
   const style = { ...readStyle(), ...(edit.style || {}) };
   const src = edit.source;
@@ -525,11 +637,13 @@ function build(dir, edit, { quality = 'draft', render: doRender = true, finalNam
   const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, captions: buildCaptions(tl.words, style, hookEnd, tl.duration), words: tl.words };
   const formats = style.format === 'both' ? ['vertical', 'horizontal'] : [style.format];
   log(`cut: ${src.duration.toFixed(1)}s -> ${tl.duration.toFixed(1)}s in ${tl.segments.length} pieces, ${tl.words.length} words, captions: ${style.captions}`);
+  const broll = Array.isArray(edit.broll) ? edit.broll : await fetchBroll(dir, tl, style, hookEnd);
   buildVoice(dir, tl.segments, src.hasAudio, tl.duration);
   const mixInfo = buildMix(dir, plan, style, tl.duration);
   const outputs = [];
   for (const fmt of formats) {
     const lay = layoutFor(fmt, src);
+    plan.broll = prepareBroll(dir, broll, lay);
     const file = fmt === formats[0] ? 'index.html' : 'compositions/horizontal.html';
     if (fmt === formats[0]) buildFootage(dir, tl.segments, lay, style.grade);
     else {
@@ -552,7 +666,7 @@ function build(dir, edit, { quality = 'draft', render: doRender = true, finalNam
     outputs.push(join(outbox, name));
   }
   writeFileSync(join(dir, 'assets/plan.json'), JSON.stringify({ ...plan, style, mix: mixInfo }, null, 2));
-  return { plan, style, outputs, mixInfo };
+  return { plan, style, outputs, mixInfo, broll };
 }
 
 function notes(dir, edit, result, suggestions) {
@@ -569,6 +683,9 @@ function notes(dir, edit, result, suggestions) {
     plan.hook ? `- Hook text for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}".` : '- No hook text (per your style).',
     `- Format ${style.format}, color ${style.grade}, slow push-in on every shot.`,
     `- Sound: ${style.sound === 'voice' ? 'voice only' : `${result.mixInfo.cues.length} soft effects`}${result.mixInfo.music ? `, music bed "${result.mixInfo.music}" ducked under the voice` : ''}, mastered to -14 LUFS.`,
+    result.broll.length
+      ? `- B-roll: ${result.broll.length} free stock clip${result.broll.length > 1 ? 's' : ''} on the words ${result.broll.map((b) => `"${b.query}" (${fmt(b.at)}, ${b.provider}, ${b.author || 'unknown'})`).join(', ')}. Sources in assets/broll/ledger.json. Your own clips in inbox/ beat stock: tell your agent which ones.`
+      : brollProvider() ? '- B-roll: none found or turned off.' : '- B-roll: off. Put a free Pexels or Pixabay key in .env to add stock clips on the key words.',
     '',
   ];
   if (suggestions.length) {
@@ -584,7 +701,7 @@ function notes(dir, edit, result, suggestions) {
 }
 const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${(s % 60).toFixed(2).padStart(5, '0')}`;
 
-function edit(video) {
+async function edit(video) {
   const source = resolve(video);
   if (!existsSync(source)) die(`not found: ${source}`);
   const slug = opt.slug || slugify(basename(source));
@@ -613,10 +730,12 @@ function edit(video) {
     deletes: cuts.deletes.map((d) => ({ start: r3(d.start), end: r3(d.end), reason: d.reason })),
     suggestions: cuts.suggestions.map((s) => ({ ...s, start: r3(s.start), end: r3(s.end) })),
     fixes: {},
-    _help: 'segments: kept source ranges in order (seconds). fixes: {"<word index in raw.json>": "new text" or ""}. hook: {"lines":[..],"end":s} or null. style: overrides for format/captions/position/color/accent/hook/pace/grade/sound.',
+    _help: 'segments: kept source ranges in order (seconds). fixes: {"<word index in raw.json>": "new text" or ""}. hook: {"lines":[..],"end":s} or null. style: overrides for format/captions/position/color/accent/hook/pace/grade/sound/broll. broll: the stock inserts (delete one to drop it, [] for none, remove the key to search again).',
   };
   writeFileSync(join(dir, 'edit.json'), JSON.stringify(editDoc, null, 2));
-  const result = build(dir, editDoc, { quality: opt.quality, render: !opt['no-render'] });
+  const result = await build(dir, editDoc, { quality: opt.quality, render: !opt['no-render'] });
+  editDoc.broll = result.broll;
+  writeFileSync(join(dir, 'edit.json'), JSON.stringify(editDoc, null, 2));
   const notesPath = notes(dir, editDoc, result, cuts.suggestions);
   for (const o of result.outputs) log(`draft: ${o}`);
   log(`notes: ${notesPath}`);
@@ -629,9 +748,11 @@ function loadEdit(slug) {
   if (!existsSync(p)) die(`no edit.json in ${dir}. Projects: ${readdirSync(projects).filter((d) => existsSync(join(projects, d, 'edit.json'))).join(', ') || 'none'}`);
   return { dir, edit: JSON.parse(readFileSync(p, 'utf8')) };
 }
-function rebuild(slug, finalRender = false) {
+async function rebuild(slug, finalRender = false) {
   const { dir, edit: doc } = loadEdit(slug);
-  const result = build(dir, doc, { quality: finalRender ? (opt.quality === 'draft' ? 'standard' : opt.quality) : opt.quality, render: !opt['no-render'], finalName: finalRender });
+  const result = await build(dir, doc, { quality: finalRender ? (opt.quality === 'draft' ? 'standard' : opt.quality) : opt.quality, render: !opt['no-render'], finalName: finalRender });
+  doc.broll = result.broll;
+  writeFileSync(join(dir, 'edit.json'), JSON.stringify(doc, null, 2));
   notes(dir, doc, result, doc.suggestions || []);
   for (const o of result.outputs) log(`${finalRender ? 'final' : 'draft'}: ${o}`);
 }
@@ -646,7 +767,13 @@ function watch() {
   const every = Math.max(2, Number(opt.every) || 5) * 1000;
   const seen = new Map();
   log(`watching ${inbox} every ${every / 1000}s. Drop a video in; drafts land in outbox/. Ctrl+C to stop.`);
-  const tick = () => {
+  let busy = false;
+  const tick = async () => {
+    if (busy) return;
+    busy = true;
+    try { await scan(); } finally { busy = false; }
+  };
+  const scan = async () => {
     for (const name of readdirSync(inbox)) {
       if (!VIDEO_EXT.has(extname(name).toLowerCase())) continue;
       const p = join(inbox, name), st = statSync(p);
@@ -658,7 +785,7 @@ function watch() {
       if (!prev || prev.size !== st.size || prev.mtime !== st.mtimeMs || Date.now() - prev.at < every) continue;
       log(`new video: ${name}`);
       try {
-        const { slug, outputs } = edit(p);
+        const { slug, outputs } = await edit(p);
         state.done[key] = { slug, outputs, at: new Date().toISOString() };
       } catch (e) {
         state.done[key] = { error: e.message, at: new Date().toISOString() };
@@ -684,9 +811,9 @@ function status() {
 }
 
 switch (command) {
-  case 'edit': if (!target) die('usage: node fable.mjs edit <video>'); edit(target); break;
-  case 'rebuild': if (!target) die('usage: node fable.mjs rebuild <slug>'); rebuild(target); break;
-  case 'final': if (!target) die('usage: node fable.mjs final <slug>'); rebuild(target, true); break;
+  case 'edit': if (!target) die('usage: node fable.mjs edit <video>'); await edit(target); break;
+  case 'rebuild': if (!target) die('usage: node fable.mjs rebuild <slug>'); await rebuild(target); break;
+  case 'final': if (!target) die('usage: node fable.mjs final <slug>'); await rebuild(target, true); break;
   case 'watch': watch(); break;
   case 'status': status(); break;
   default:

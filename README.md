@@ -83,6 +83,7 @@ YouTube and it gets its own framing and text placement.
 | Cuts | Removes dead air, stutters, and clear retakes, cutting only between phrases at real silence, frame-aligned so lips stay in sync |
 | Captions | Word by word, bold key words, key-word pills, or subtitles, in your position and colors, timed to each word |
 | Hook | Big two-line text in the first seconds, built from your first sentence, if you want it |
+| B-roll | Optional: free stock clips from Pixabay or Pexels cut in on the key words, every source logged; your own extra clips win |
 | Camera | A slow push-in on every shot; landscape clips get a glowing band layout in vertical |
 | Color | Natural, warm, cool, black and white, or orange and teal |
 | Sound | Soft taps and clicks on real cuts, a music bed from `my-sounds` ducked under your voice, mastered to -14 LUFS |
@@ -99,6 +100,9 @@ YouTube and it gets its own framing and text placement.
   (fast, best for Taglish), or [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
   on your own computer (`pip install faster-whisper`, needs Python). If Groq fails, Fable
   falls back to local automatically when it is installed.
+- **Optional: a free [Pixabay](https://pixabay.com/api/docs/) or Pexels key** in `.env` for
+  stock B-roll, turned on with a "B-roll: some" line in your style. Without it, Fable edits
+  with your footage only.
 - **Optional: an AI coding agent that can run terminal commands** for the refined edits and
   for talking in plain words. Editing uses a lot of usage. Codex blocks internet in its
   sandbox by default, so approve network access when setup or transcription asks.

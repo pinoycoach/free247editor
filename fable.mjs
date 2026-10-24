@@ -591,7 +591,21 @@ function buildFootage(dir, segments, lay, grade) {
   const v = segments.map((s, i) => `[0:v]trim=start_frame=${frames(s.src0)}:end_frame=${frames(s.src0) + s.frames},setpts=PTS-STARTPTS,${scale},${GRADES[grade] || GRADES.natural},setsar=1,format=yuv420p[v${i}]`);
   const script = join(dir, 'assets/footage.filter');
   writeFileSync(script, v.join(';\n') + ';\n' + segments.map((_, i) => `[v${i}]`).join('') + `concat=n=${segments.length}:v=1:a=0[out]`);
-  ff(['-i', 'assets/raw.mp4', '-/filter_complex', script, '-map', '[out]', '-c:v', 'libx264', '-preset', 'medium', '-crf', '17', '-r', String(FPS), '-movflags', '+faststart', 'assets/footage.mp4'], dir);
+  // x264 at medium is the first choice; on a memory-starved laptop it can refuse to open, so step
+  // down rather than fail. The file is checked afterwards: a broken footage file stops the run.
+  const ladder = [['-c:v', 'libx264', '-preset', 'medium', '-crf', '17'], ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-threads', '2']];
+  if (hasAmf()) ladder.push(['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '18', '-qp_p', '18']);
+  let lastError = null;
+  for (const enc of ladder) {
+    try {
+      ff(['-i', 'assets/raw.mp4', '-/filter_complex', script, '-map', '[out]', ...enc, '-r', String(FPS), '-movflags', '+faststart', 'assets/footage.mp4'], dir);
+      const size = statSync(join(dir, 'assets/footage.mp4')).size;
+      if (size < 10000) throw new Error(`footage came out empty (${size} bytes) with ${enc[1]}`);
+      if (enc !== ladder[0]) log(`footage encoded with ${enc[1]} ${enc[3]} (the usual encoder could not start; the computer is low on memory)`);
+      return;
+    } catch (e) { lastError = e; }
+  }
+  throw new Error(`could not encode the cut footage. ${lastError?.message.split('\n')[0]}. Free some memory (close browser tabs or other apps) and run again.`);
 }
 function buildVoice(dir, segments, hasAudio, duration) {
   if (!hasAudio) { ff(['-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${duration}`, 'assets/voice.wav'], dir); return; }

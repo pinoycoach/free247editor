@@ -120,13 +120,23 @@ export function renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, 
   });
   chain.push(`${base}ass=assets/captions.ass:fontsdir=assets/fonts,format=yuv420p[v]`);
   const draft = quality === 'draft';
-  const video = draft && hasAmf
-    ? ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'cqp', '-qp_i', '24', '-qp_p', '24']
-    : draft ? ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24']
-      : ['-c:v', 'libx264', '-preset', quality === 'high' ? 'slow' : 'medium', '-crf', quality === 'high' ? '17' : '19'];
+  // Encoder ladder: the first that opens wins. x264 at medium wants more RAM than a busy laptop
+  // sometimes has, so finals step down to a lighter x264 and then to the GPU encoder.
+  const ladder = draft
+    ? [hasAmf && ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'cqp', '-qp_i', '24', '-qp_p', '24'], ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24']]
+    : [['-c:v', 'libx264', '-preset', quality === 'high' ? 'slow' : 'medium', '-crf', quality === 'high' ? '17' : '19'],
+      ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-threads', '2'],
+      hasAmf && ['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '20', '-qp_p', '20']];
   const started = Date.now();
-  ff([...inputs, '-filter_complex', chain.join(';'), '-map', '[v]', '-map', '1:a', '-t', String(D), ...video, '-r', String(FPS), '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', out], dir);
-  return { out: join(dir, out), encoder: video[1], seconds: Math.round((Date.now() - started) / 100) / 10 };
+  let lastError = null, used = null;
+  for (const video of ladder.filter(Boolean)) {
+    try {
+      ff([...inputs, '-filter_complex', chain.join(';'), '-map', '[v]', '-map', '1:a', '-t', String(D), ...video, '-r', String(FPS), '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', out], dir);
+      used = `${video[1]} ${video[3]}`; lastError = null; break;
+    } catch (e) { lastError = e; }
+  }
+  if (lastError) throw lastError;
+  return { out: join(dir, out), encoder: used, seconds: Math.round((Date.now() - started) / 100) / 10 };
 }
 
 // Contact sheets for review: the first 2.5 s at 0.25 s steps (3x3), and one frame per shot.

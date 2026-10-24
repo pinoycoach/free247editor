@@ -258,6 +258,11 @@ function planCuts(words, duration, style) {
       break;
     }
   }
+  // A sung or chanted run ("na na na na") is one note, not ten.
+  for (let i = suggestions.length - 1; i > 0; i--) {
+    const a = suggestions[i - 1], b = suggestions[i];
+    if (a.kind === 'stutter' && b.kind === 'stutter' && a.reason === b.reason && b.start - a.end < 0.3) { a.end = b.end; a.reason = a.reason.replace(/ twice$/, ' repeated'); suggestions.splice(i, 1); }
+  }
   // Merge, snap to frames, never land inside a word.
   deletes.sort((a, b) => a.start - b.start);
   const merged = [];

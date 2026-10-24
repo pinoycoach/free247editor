@@ -27,3 +27,6 @@ my-rules.md
 .DS_Store
 Thumbs.db
 __pycache__/
+
+# Research scratch (reports/ is kept)
+research_notes/

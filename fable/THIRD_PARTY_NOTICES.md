@@ -29,6 +29,4 @@ workflow. Third-party notices override these grants for their respective assets.
 Library names, handles, statistics, and source labels inside cards are illustrative
 placeholders. Replace them with your own verified copy before publishing a video.
 
-The three videos in examples/showcase were also explicitly supplied by Nate for
-public inclusion as finished-output references. They retain their existing asset
-rights; inclusion does not grant rights to third-party brands or embedded media.
+No example videos ship with the Fable engine.

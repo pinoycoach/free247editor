@@ -19,21 +19,25 @@ const t = (s) => {
 const esc = (s) => s.replace(/[{}\\]/g, '').replace(/\n/g, '\\N');
 
 // Where captions and the hook sit, in composition pixels. Mirrors composition() in fable.mjs.
+// The top 14% and the bottom 20% of a phone screen belong to the platform's buttons and labels.
+// The hook card hangs just below that top line; captions sit below the card, never inside it.
 export function captionLayout(lay, style) {
   const { w: W, h: H } = lay, F = lay.foot, vertical = H > W;
   const sc = style.scale || 1;
+  const word = Math.round((vertical ? 128 : 96) * sc), group = Math.round((vertical ? 70 : 56) * sc);
+  const sub = Math.round((vertical ? 50 : 42) * sc), hook = Math.round((vertical ? 80 : 64) * sc);
+  const safeTop = Math.round(0.14 * H), safeBottom = Math.round(0.80 * H);
+  const hookBlock = Math.round(hook * 1.25 * 2);                 // two lines at 1.25 line height
+  const hookY = safeTop + 12 + hookBlock / 2;                     // center of the card
+  const hookBottom = hookY + hookBlock / 2;
+  const capFont = style.captions === 'subtitles' ? sub : style.captions === 'word' ? word : group;
+  const underHook = Math.round(hookBottom + 36 + capFont * 0.7);  // first safe center under the card
   let capY;
   if (vertical) {
-    if (lay.fit === 'band') capY = style.position === 'lower' ? F.y + F.h + 200 : style.position === 'middle' ? F.y - 60 : 470;
-    else capY = style.position === 'lower' ? 1460 : style.position === 'middle' ? H / 2 : 470;
-  } else capY = style.position === 'upper' ? 200 : style.position === 'middle' ? H / 2 : H - 170;
-  const hookY = vertical ? (lay.fit === 'band' && style.position !== 'lower' ? Math.max(150, F.y - 330) : 230) : 110;
-  return {
-    capX: W / 2, capY, hookX: W / 2, hookY,
-    word: Math.round((vertical ? 128 : 96) * sc), group: Math.round((vertical ? 70 : 56) * sc),
-    sub: Math.round((vertical ? 50 : 42) * sc), hook: Math.round((vertical ? 80 : 64) * sc),
-    maxWidth: vertical ? 920 : 1600,
-  };
+    if (lay.fit === 'band') capY = style.position === 'lower' ? Math.min(F.y + F.h + 120, safeBottom - capFont) : style.position === 'middle' ? Math.max(underHook, F.y - capFont) : underHook;
+    else capY = style.position === 'lower' ? safeBottom - capFont : style.position === 'middle' ? H / 2 : underHook;
+  } else capY = style.position === 'upper' ? underHook : style.position === 'middle' ? H / 2 : H - 170;
+  return { capX: W / 2, capY: Math.round(capY), hookX: W / 2, hookY: Math.round(hookY), hookBlock, word, group, sub, hook, safeTop, safeBottom, maxWidth: vertical ? 920 : 1600 };
 }
 
 export function buildAss(plan, lay, style) {

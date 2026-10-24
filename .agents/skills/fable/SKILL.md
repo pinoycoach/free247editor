@@ -104,13 +104,13 @@ API). The default is to use none of them.
    output yet. If the user attached a video but you cannot see a file path, ask them to put it
    in `inbox/`. Never modify the user's original.
 2. Run the autopilot from the repo root: `node fable.mjs edit "<path>"`. It normalizes the
-   video, transcribes for free, cuts dead air, stutters, and clear retakes between phrases at
-   real silence, builds captions and the hook from `my-style.md` and `my-rules.md`, mixes soft
+   video, transcribes for free, cuts dead air and stutters only where the audio is measured
+   quiet (repeated lines are listed as possible retakes, never cut on their own), builds captions and the hook from `my-style.md` and `my-rules.md`, mixes soft
    effects (and a music bed from `my-sounds/` when the style asks), renders a draft, and
    adds free stock B-roll on the concrete words when the style asks for it and `.env` has a
    Pixabay or Pexels key,
    renders a draft, and writes `outbox/<slug>-v1.mp4` and `outbox/<slug>-notes.md`. The whole edit is in
-   `fable/video-projects/<slug>/edit.json`. A render takes a few minutes; run it in the
+   `fable/video-projects/<slug>/edit.json`. A draft renders in seconds; the whole run is a minute or two. Run it in the
    background if your agent supports that.
 3. Read the notes file, then look at the two review sheets it names: `assets/review-open.png`
    (the first 2.5 s, nine frames) and `assets/review-shots.png` (one frame per shot). Judge the
@@ -125,10 +125,11 @@ API). The default is to use none of them.
    horizontal). Add motion cards, B-roll from extra clips in `inbox/` that the user calls
    B-roll, zoom-ins on the key line, and a payoff, directly in the project's `index.html`
    (it is a normal HyperFrames composition; `assets/plan.json` has every word, segment, and
-   caption on the final timeline). That path renders in Chrome and takes minutes:
-   `node fable.mjs rebuild <slug> --engine browser`, or `npx hyperframes render --quality
-   draft --frames-cache-dir off` from the project folder, then copy to `outbox/<slug>-v2.mp4`.
-   Use it only when the video needs motion graphics; plain captions never need it. Rules beat style; style beats the
+   caption on the final timeline). Once you edit `index.html` by hand, Fable keeps it: later
+   rebuilds write their version to `index.generated.html` beside it and say so. Render your
+   version in Chrome (minutes, not seconds) with `npx hyperframes render --quality draft
+   --frames-cache-dir off` from the project folder, then copy to `outbox/<slug>-v2.mp4`. Use it
+   only when the video needs motion graphics; plain captions never need it. Rules beat style; style beats the
    engine's house style. Never download music or footage you have no right to use.
 5. Open the draft. Tell the user in 3 to 5 short bullets what you did (the notes file has the
    numbers), list anything the autopilot left in for them to decide, then ask for notes.
@@ -161,7 +162,8 @@ notes file.
 
 ## Never
 
-- Post, upload, or send a video anywhere.
+- Post, upload, or send a video anywhere. Say truthfully what left the computer: the notes
+  file names Groq (audio) and the stock site (key words) when they were used.
 - Print or log the Groq key.
 - Commit or publish anything in `inbox/`, `outbox/`, `my-style.md`, `my-rules.md`,
   `my-sounds/`, or `fable/video-projects/`.

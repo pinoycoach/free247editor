@@ -27,6 +27,7 @@ The engine began as a fork of [Herk Edit Kit](https://github.com/nateherkai/herk
 by Nate Herk (MIT) at commit `10511e5`, which builds on
 [HyperFrames](https://github.com/heygen-com/hyperframes) (Apache-2.0) and
 [GSAP](https://gsap.com/). Fable removed the kit's brand assets, example projects,
-showcase media, and paid-service scripts, and added the free transcription and the
-autopilot. Licenses and notices are in `licenses/` and `THIRD_PARTY_NOTICES.md`.
+showcase media, and the paid transcription, voice, and generation scripts, and added the free
+transcription and the autopilot. Skill text still names paid services as options; Fable never
+calls one without the user's yes. Licenses and notices are in `licenses/` and `THIRD_PARTY_NOTICES.md`.
 Fable is not affiliated with Nate Herk or HeyGen.

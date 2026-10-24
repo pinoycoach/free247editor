@@ -13,11 +13,12 @@
 // Style comes from my-style.md; rules from my-rules.md.
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { hasFastFonts, renderFast, reviewSheets } from './tools/fast-render.mjs';
+import { captionLayout, hasFastFonts, renderFast, reviewSheets } from './tools/fast-render.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -64,6 +65,7 @@ function run(cmd, args, { cwd = root, quiet = true, shell = false } = {}) {
   return r.stdout || '';
 }
 const ff = (args, cwd) => run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { cwd });
+const sha = (s) => createHash('sha256').update(s).digest('hex');
 let amfChecked = null;
 const hasAmf = () => (amfChecked ??= /h264_amf/.test(run('ffmpeg', ['-hide_banner', '-encoders'])));
 
@@ -130,6 +132,9 @@ function readStyle() {
         else if (/music/.test(line) && !never) style.sound = 'music';
         else if (/light|some|sound effects|sfx/.test(line)) style.sound = 'light';
       }
+      if (/retakes?:/.test(line)) style.retakes = /\bcut\b|remove|auto/.test(line) && !never ? 'cut' : 'suggest';
+      if (/stutters?:/.test(line)) style.stutters = /suggest|ask|keep/.test(line) || never ? 'suggest' : 'cut';
+      if (/privacy|stealth|offline|local only/.test(line)) style.privacy = /local|offline|stealth|only/.test(line) && !/\bno\b|off/.test(line) ? 'local' : 'normal';
       if (/b-?roll|stock (footage|clips?)/.test(line)) {
         if (never) style.broll = 'none';
         else if (/lots|heavy|marami|many|every/.test(line)) style.broll = 'lots';
@@ -183,50 +188,154 @@ function newProject(slug, dims) {
 }
 
 // ---------- transcription ----------
-function transcribe(dir) {
+// Returns { transcript, provider }. provider is 'groq' (audio leaves the computer), 'local', or null.
+function transcribe(dir, style, names = []) {
   const raw = join(dir, 'assets/raw.mp4');
   const out = join(dir, 'assets/raw.json');
   try { process.loadEnvFile(join(root, '.env')); } catch {}
-  const attempts = process.env.GROQ_API_KEY ? [[], ['--local']] : [['--local']];
+  const groqAllowed = process.env.GROQ_API_KEY && style.privacy !== 'local';
+  const attempts = groqAllowed ? [[], ['--local']] : [['--local']];
+  // Names and brand words from my-rules.md steer the speech model so "Phi Phi" is not "Stevie".
+  const prompt = names.length ? ['--prompt', names.join(', ')] : [];
   let lastError = '';
   for (const extra of attempts) {
     try {
-      run('node', [join(root, 'tools/transcribe.mjs'), raw, ...extra]);
-      return JSON.parse(readFileSync(out, 'utf8'));
+      run('node', [join(root, 'tools/transcribe.mjs'), raw, ...extra, ...prompt]);
+      return { transcript: JSON.parse(readFileSync(out, 'utf8')), provider: extra[0] === '--local' ? 'local' : 'groq' };
     } catch (e) { lastError = e.message; log(`transcription ${extra[0] || 'with Groq'} failed, ${attempts.length > 1 ? 'trying the other way' : 'continuing without words'}`); }
   }
   log(`no transcript: ${lastError.split('\n')[0]}`);
-  return { words: [], audio_duration_secs: 0 };
+  return { transcript: { words: [], audio_duration_secs: 0 }, provider: null };
 }
 
 // ---------- cuts: between phrases, at real silence ----------
 const STOP = new Set('a an and are as at be but by for from i if in is it of on or so that this to was we with you your they their there what when where why how like um uh the yung ang ng na sa si mga ay at kasi parang yun ako ko mo ka'.split(' '));
 const token = (t) => (t || '').toLowerCase().replace(/^[^a-z0-9$%]+|[^a-z0-9$%]+$/g, '');
 
-function planCuts(words, duration, style) {
+// Where the audio is actually quiet, from FFmpeg's silencedetect. The transcript says where words
+// are; only the audio says where nothing is. Returns [{ start, end }] in source seconds.
+function detectSilence(file, { noise = -35, min = 0.15 } = {}) {
+  const r = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-i', file, '-vn', '-af', `silencedetect=noise=${noise}dB:d=${min}`, '-f', 'null', '-'], { encoding: 'utf8', maxBuffer: 1 << 26, windowsHide: true });
+  const out = [];
+  let open = null;
+  for (const m of (r.stderr || '').matchAll(/silence_(start|end): ([\d.]+)/g)) {
+    if (m[1] === 'start') open = Number(m[2]);
+    else if (open !== null) { out.push({ start: open, end: Number(m[2]) }); open = null; }
+  }
+  if (open !== null) out.push({ start: open, end: Infinity });
+  return out;
+}
+// Phone recordings carry room noise, so one fixed threshold finds nothing. Start strict and loosen
+// until the pauses the transcript shows are mostly quiet; stop there. Returns { silences, noise }.
+function detectSilenceAdaptive(file, words, gapMin = 0.42) {
+  const gaps = [];
+  for (let i = 1; i < words.length; i++) if (words[i].start - words[i - 1].end >= gapMin) gaps.push({ start: words[i - 1].end, end: words[i].start });
+  const gapTotal = gaps.reduce((a, g) => a + (g.end - g.start), 0);
+  let last = { silences: [], noise: -35 };
+  for (const noise of [-40, -35, -30, -26, -22, -18, -14]) {
+    const silences = detectSilence(file, { noise });
+    last = { silences, noise };
+    if (!gapTotal) return last;
+    const quiet = gaps.reduce((a, g) => { const q = insideSilence(g.start, g.end, silences, 0); return a + (q ? q.end - q.start : 0); }, 0);
+    if (quiet / gapTotal >= 0.75) return last;
+  }
+  return last;
+}
+// Snap near-misses of known names to their spelling: "Phe" -> "Phi", "Stevie" stays (too far).
+function applyNames(words, names) {
+  const canon = names.flatMap((n) => n.split(/\s+/)).filter((w) => w.length >= 3);
+  if (!canon.length) return 0;
+  const dist = (a, b) => { if (Math.abs(a.length - b.length) > 1) return 9; let d = 0, i = 0, j = 0; while (i < a.length && j < b.length) { if (a[i] === b[j]) { i++; j++; } else { d++; if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; } } } return d + (a.length - i) + (b.length - j); };
+  let n = 0;
+  for (const w of words) {
+    const t = token(w.text);
+    if (!t || t.length < 3) continue;
+    const hit = canon.find((c) => c.toLowerCase() !== t && dist(c.toLowerCase(), t) <= 1);
+    if (hit) { w.text = w.text.replace(/[\p{L}\p{N}']+/u, hit); n++; }
+  }
+  return n;
+}
+// Clip a wanted delete range to the quiet part inside it. Null when no silence overlaps it.
+function insideSilence(start, end, silences, tol = 0.03) {
+  let best = null;
+  for (const s of silences) {
+    const a = Math.max(start, s.start - tol), b = Math.min(end, s.end + tol);
+    if (b - a > 0.04 && (!best || b - a > best.end - best.start)) best = { start: a, end: b };
+  }
+  return best;
+}
+// Speech the transcript missed: voiced stretches with no word in them.
+function untranscribed(words, silences, duration, minLen = 0.8) {
+  const voiced = [];
+  let t = 0;
+  for (const s of [...silences].sort((a, b) => a.start - b.start)) { if (s.start > t) voiced.push({ start: t, end: s.start }); t = Math.max(t, Math.min(s.end, duration)); }
+  if (t < duration) voiced.push({ start: t, end: duration });
+  return voiced.filter((v) => v.end - v.start >= minLen && !words.some((w) => w.start < v.end && w.end > v.start)).map((v) => ({ start: r3(v.start), end: r3(v.end) }));
+}
+// Names from my-rules.md lines like: Names: the dog is "Phi Phi" ...
+function knownNames() {
+  const p = join(root, 'my-rules.md');
+  if (!existsSync(p)) return [];
+  const names = new Set();
+  for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) if (/^\s*-?\s*names?:/i.test(line)) for (const m of line.matchAll(/"([^"]+)"/g)) names.add(m[1]);
+  return [...names];
+}
+
+function planCuts(words, duration, style, silences = null, names = []) {
   const gapMin = style.pace === 'tight' ? 0.42 : 0.8;
   const headPad = 0.12, tailPad = 0.35;
-  const deletes = [], suggestions = [];
+  const deletes = [], suggestions = [], missed = [];
   const push = (start, end, reason) => { if (end - start >= 0.04) deletes.push({ start, end, reason }); };
-  if (!words.length) return { deletes: [], suggestions, keeps: [{ src0: 0, src1: duration }] };
+  // A pause is deleted only where the audio is really quiet. Without silence data, trust the gap.
+  const pause = (start, end, reason, gapStart, gapEnd) => {
+    if (!silences) return push(start, end, reason);
+    const quiet = insideSilence(start, end, silences);
+    if (quiet) return push(quiet.start, quiet.end, reason);
+    if (gapEnd - gapStart >= 0.6) missed.push({ start: r3(gapStart), end: r3(gapEnd), reason: 'no words here but the audio is not quiet: likely speech the transcript missed, kept' });
+  };
+  if (!words.length) return { deletes: [], suggestions, missed, keeps: [{ src0: 0, src1: duration }] };
 
-  if (words[0].start - headPad > 0) push(0, words[0].start - headPad, 'dead air before the first word');
-  if (duration > words.at(-1).end + tailPad) push(words.at(-1).end + tailPad, duration, 'dead air after the last word');
+  if (words[0].start - headPad > 0) pause(0, words[0].start - headPad, 'dead air before the first word', 0, words[0].start);
+  if (duration > words.at(-1).end + tailPad) pause(words.at(-1).end + tailPad, duration, 'dead air after the last word', words.at(-1).end, duration);
   for (let i = 1; i < words.length; i++) {
     const prev = words[i - 1], next = words[i], gap = next.start - prev.end;
     if (gap < gapMin) continue;
     const sentence = /[.!?]$/.test(prev.text);
     const keep = gap >= 2 ? 0.26 : sentence ? 0.22 : 0.16;
-    push(prev.end + keep * 0.55, next.start - keep * 0.45, `pause ${gap.toFixed(2)}s -> ${keep.toFixed(2)}s`);
+    pause(prev.end + keep * 0.55, next.start - keep * 0.45, `pause ${gap.toFixed(2)}s -> ${keep.toFixed(2)}s`, prev.end, next.start);
   }
-  // Stutters: "the the". Cut the first one only when it sits in silence on both sides.
+  // Stutters: "the the". Cut the first one only when it sits in silence on both sides, and never
+  // when the repeat is a name ("Phi Phi"), a name from my-rules.md, or said twice on purpose.
+  const nameTokens = new Set(names.flatMap((n) => n.split(/\s+/).map(token)));
+  const pairs = new Map();
+  for (let i = 1; i < words.length; i++) { const t = token(words[i].text); if (t && token(words[i - 1].text) === t) pairs.set(t, (pairs.get(t) || 0) + 1); }
   for (let i = 1; i < words.length; i++) {
-    const a = words[i - 1], b = words[i];
-    if (!token(b.text) || token(a.text) !== token(b.text) || b.start - a.end >= 0.5) continue;
+    const a = words[i - 1], b = words[i], t = token(b.text);
+    if (!t || token(a.text) !== t || b.start - a.end >= 0.5) continue;
+    const midSentence = i >= 2 && !/[.!?]$/.test(words[i - 2].text);
+    const name = nameTokens.has(t) || (midSentence && /^[A-Z]/.test(a.text) && /^[A-Z]/.test(b.text)) || (pairs.get(t) || 0) >= 2;
+    if (name) { suggestions.push({ start: a.start, end: b.start, kind: 'repeat kept', reason: `"${a.text} ${b.text}" looks like a name or a deliberate repeat`, why: 'left as spoken' }); continue; }
     const before = i >= 2 ? a.start - words[i - 2].end : a.start;
     const cut = { start: a.start, end: b.start, reason: `stutter "${a.text}"` };
-    if (before >= 0.12 && b.start - a.end >= 0.06) push(cut.start, cut.end, cut.reason);
+    if (before >= 0.12 && b.start - a.end >= 0.06 && style.stutters !== 'suggest') push(cut.start, cut.end, cut.reason);
     else suggestions.push({ start: cut.start, end: cut.end, kind: 'stutter', reason: `"${a.text}" twice`, why: 'inside a phrase; cutting it would clip the words around it' });
+  }
+  // Short retakes the phrase comparison below cannot see: the same four words again within 30 s.
+  const toks = words.map((w) => token(w.text));
+  const grams = new Map();
+  for (let i = 0; i + 4 <= words.length; i++) {
+    if (toks.slice(i, i + 4).some((x) => !x)) continue;
+    const g = toks.slice(i, i + 4).join(' ');
+    const first = grams.get(g);
+    if (first === undefined) { grams.set(g, i); continue; }
+    if (i - first >= 4 && words[i].start - words[first].start <= 30) {
+      const silBefore = first === 0 ? Infinity : words[first].start - words[first - 1].end;
+      const silAfter = words[i].start - words[i - 1].end;
+      const clean = silBefore >= 0.2 && silAfter >= 0.2;
+      const s = { start: words[first].start, end: words[i].start, kind: 'possible retake', reason: `"${words.slice(first, first + 4).map((w) => w.text).join(' ')}..." is said again ${(words[i].start - words[first].start).toFixed(1)} s later`, why: clean ? 'both edges sit in silence, so it would cut cleanly if it is a retake' : 'the edges are not in silence; cut only between phrases' };
+      if (style.retakes === 'cut' && clean) push(s.start, s.end, `retake: ${s.reason}`); else suggestions.push(s);
+    }
+    grams.set(g, i);
   }
   // Retakes: the same line said twice. Keep the last clean take when both edges land in silence.
   const segs = [];
@@ -261,7 +370,7 @@ function planCuts(words, duration, style) {
   // A sung or chanted run ("na na na na") is one note, not ten.
   for (let i = suggestions.length - 1; i > 0; i--) {
     const a = suggestions[i - 1], b = suggestions[i];
-    if (a.kind === 'stutter' && b.kind === 'stutter' && a.reason === b.reason && b.start - a.end < 0.3) { a.end = b.end; a.reason = a.reason.replace(/ twice$/, ' repeated'); suggestions.splice(i, 1); }
+    if ((a.kind === 'stutter' || a.kind === 'repeat kept') && a.kind === b.kind && a.reason === b.reason && b.start - a.end < 0.3) { a.end = b.end; a.reason = a.reason.replace(/ twice$/, ' repeated'); suggestions.splice(i, 1); }
   }
   // Merge, snap to frames, never land inside a word.
   deletes.sort((a, b) => a.start - b.start);
@@ -277,7 +386,10 @@ function planCuts(words, duration, style) {
     cursor = Math.max(cursor, d.end);
   }
   if (cursor < duration) keeps.push({ src0: cursor, src1: duration });
-  return { deletes: merged, suggestions, keeps: keeps.filter((k) => k.src1 - k.src0 >= 0.1) };
+  // The same retake found twice (phrase match and four-word match) is one note.
+  const seen = [];
+  const unique = suggestions.filter((s) => { if (s.kind !== 'possible retake') return true; if (seen.some((t) => Math.abs(t - s.start) < 0.5)) return false; seen.push(s.start); return true; });
+  return { deletes: merged, suggestions: unique, missed, keeps: keeps.filter((k) => k.src1 - k.src0 >= 0.1) };
 }
 
 // Frame-aligned segments and the words that survive on the new timeline.
@@ -291,14 +403,20 @@ function timeline(keeps, words, fixes = {}, extras = []) {
   });
   const duration = r3(secs(t));
   const toOut = (src) => { for (const s of segments) if (src >= s.src0 - 0.001 && src < s.src1) return s.out0 + (src - s.src0); return null; };
-  const kept = [];
+  const kept = [], dropped = [];
   words.forEach((w, i) => {
     const fix = fixes[String(i)];
     if (fix === '') return;
-    const start = toOut(w.start);
-    if (start === null) return;
-    const seg = segments.find((s) => start >= s.out0 - 0.001 && start < s.out1);
-    const end = Math.min(start + (w.end - w.start), seg.out1);
+    // A word stays when at least half of it is inside a kept piece, even if a cut nicked its start.
+    const overlap = (s) => Math.min(w.end, s.src1) - Math.max(w.start, s.src0);
+    const seg = segments.find((s) => overlap(s) >= Math.max(0.02, (w.end - w.start) / 2));
+    if (!seg) {
+      // Only a word a cut edge clipped is worth a warning; words inside a removed section were meant to go.
+      if (segments.some((s) => overlap(s) > 0.01)) dropped.push({ i, text: w.text, at: w.start });
+      return;
+    }
+    const start = seg.out0 + (Math.max(w.start, seg.src0) - seg.src0);
+    const end = Math.min(seg.out0 + (Math.min(w.end, seg.src1) - seg.src0), seg.out1);
     kept.push({ i, text: fix ?? w.text, start: r3(start), end: r3(Math.max(end, start + 0.05)), src: w.start });
   });
   // Words the transcript missed, added by hand in edit.json as { text, start, end } in source time.
@@ -308,7 +426,7 @@ function timeline(keeps, words, fixes = {}, extras = []) {
     kept.push({ i: 'extra', text: x.text, start: r3(start), end: r3(start + Math.max(0.2, (x.end || x.start + 0.5) - x.start)), src: x.start });
   }
   kept.sort((a, b) => a.start - b.start);
-  return { segments, duration, words: kept };
+  return { segments, duration, words: kept, dropped };
 }
 
 // ---------- captions ----------
@@ -373,11 +491,24 @@ function hookGate(plan, style, lay) {
   const first = plan.words[0];
   checks.push({ check: 'speech starts within 0.15 s', pass: !first || first.start <= 0.15, value: first ? `${first.start}s` : 'no speech' });
   checks.push({ check: 'text on frame 0', pass: Boolean(plan.hook) || style.captions === 'none', value: plan.hook ? 'hook card' : 'no hook' });
-  checks.push({ check: 'captions lead the word by 2 frames', pass: true, value: '2 frames' });
-  const upper = lay.h > lay.w ? (style.position === 'upper' || lay.fit === 'band') : true;
-  checks.push({ check: 'hook and captions outside the face band', pass: upper, value: upper ? 'upper third (assumed: check the opening sheet)' : `${style.position} third: look at review-open.png` });
+  // Measured, not assumed: the first caption must start before its word, by the 2-frame lead.
+  const firstCap = plan.captions[0], firstCapWord = firstCap && plan.words.find((w) => w.start >= firstCap.start - 0.001);
+  const lead = firstCap && firstCapWord ? r3(firstCapWord.start - firstCap.start) : null;
+  checks.push({ check: 'captions lead the word by 2 frames', pass: lead === null || lead >= 2 / FPS - 0.001 || firstCap.start <= 0.001, value: lead === null ? 'no captions' : firstCap.start <= 0.001 ? 'from frame 0' : `${Math.round(lead * FPS)} frames` });
+  // Geometry against the platform UI: nothing above 14% of the height, captions above 80%.
+  const L = captionLayout(lay, style), safeTop = Math.round(0.14 * lay.h), safeBottom = Math.round(0.80 * lay.h);
+  const hookTop = plan.hook ? Math.round(L.hookY - L.hookBlock / 2) : null;
+  const capFont = style.captions === 'subtitles' ? L.sub : style.captions === 'word' ? L.word : L.group;
+  const capTop = Math.round(L.capY - capFont * 0.7), capBottom = Math.round(L.capY + capFont * 0.7);
+  checks.push({ check: `hook card below the top ${safeTop}px (platform UI)`, pass: hookTop === null || hookTop >= safeTop, value: hookTop === null ? 'no hook' : `top at ${hookTop}px` });
+  checks.push({ check: `captions inside ${safeTop}..${safeBottom}px and clear of the hook`, pass: capTop >= safeTop && capBottom <= safeBottom && (hookTop === null || capTop >= L.hookY + L.hookBlock / 2), value: `${capTop}..${capBottom}px` });
+  checks.push({ check: 'face band: look at review-open.png', pass: true, value: lay.h > lay.w ? 'text is in the upper third; a face there would show on the sheet' : 'landscape: text in the lower third' });
   checks.push({ check: 'hook text comes from the speaker', pass: !plan.hook || !plan.hook.source || plan.hook.source.length > 0 || plan.hook.pattern === 'title', value: plan.hook?.pattern || 'none' });
-  checks.push({ check: 'payoff exists in the kept cut', pass: !plan.hook || !plan.hook.payoff || plan.words.some((w) => w.end >= plan.hook.payoff - 0.05), value: plan.hook?.payoff ? `${plan.hook.payoff}s` : '-' });
+  // The promise on the card must be kept in the cut: every word on the card is spoken in it.
+  const said = new Set(plan.words.map((w) => token(w.text)));
+  const cardWords = plan.hook ? plan.hook.lines.join(' ').split(/\s+/).map(token).filter((t) => t.length >= 3) : [];
+  const missing = cardWords.filter((t) => !said.has(t));
+  checks.push({ check: 'the words on the hook card are spoken in the cut', pass: !missing.length, value: missing.length ? `not heard: ${missing.join(', ')}` : cardWords.length ? 'all spoken' : '-' });
   return checks;
 }
 
@@ -388,7 +519,14 @@ function chooseHook(edit, words, style) {
   if (edit.hook && typeof edit.hook === 'object') hook = { ...edit.hook };
   else if (typeof edit.hook === 'number' && candidates[edit.hook]) hook = { ...candidates[edit.hook] };
   else if (candidates.length) hook = { ...candidates[0] };
-  if (hook && !hook.end) hook.end = r3(Math.min(2.6, Math.max(1.6, (hook.payoff || 2) + 0.15)));
+  if (hook) {
+    // end is seconds. 2200 means someone typed milliseconds; "2.2s" means a string. Both get fixed.
+    const typed = hook.end, n = Number(String(typed ?? '').replace(/s$/i, ''));
+    if (!Number.isFinite(n) || n < 0.5) hook.end = r3(Math.min(2.6, Math.max(1.6, (hook.payoff || 2) + 0.15)));
+    else if (n > 60) hook.end = r3(Math.min(4, n / 1000));
+    else hook.end = r3(Math.min(4, n));
+    if (typed !== undefined && hook.end !== typed) log(`hook.end ${JSON.stringify(typed)} -> ${hook.end} s`);
+  }
   return { hook, candidates };
 }
 
@@ -526,13 +664,12 @@ function buildMix(dir, plan, style, duration) {
 function composition(plan, lay, style, formatName) {
   const { w: W, h: H } = lay, F = lay.foot, D = plan.duration, vertical = H > W;
   const sc = style.scale || 1;
+  // One layout for both engines: captionLayout() in tools/fast-render.mjs owns the numbers.
+  const L = captionLayout(lay, style);
   const capW = vertical ? 900 : 1600, capH = vertical ? 380 : 220, capX = (W - capW) / 2;
-  let capY;
-  if (vertical) {
-    if (lay.fit === 'band') capY = style.position === 'lower' ? F.y + F.h + 40 : style.position === 'middle' ? F.y - capH - 30 : 200;
-    else capY = style.position === 'lower' ? 1600 - capH : style.position === 'middle' ? (H - capH) / 2 : 200;
-  } else capY = style.position === 'upper' ? 70 : style.position === 'middle' ? (H - capH) / 2 : H - capH - 60;
-  const big = Math.round((vertical ? 118 : 92) * sc), group = Math.round((vertical ? 66 : 54) * sc), sub = Math.round((vertical ? 48 : 42) * sc);
+  const capY = Math.round(L.capY - capH / 2);
+  const big = L.word, group = L.group, sub = L.sub;
+  const hookTop = Math.round(L.hookY - L.hookBlock / 2 - capY), hookH = Math.round(L.hookBlock);
   const fade = lay.fit === 'cover' && style.position === 'upper';
   const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
   const bg = lay.fit === 'cover' ? '#000' : '#0b0f17';
@@ -595,7 +732,7 @@ html,body{margin:0;width:${W}px;height:${H}px;overflow:hidden;background:${bg}}
   if (P.hook) {
     var h = document.createElement('div'); h.className='c hook'; h.id='hook';
     P.hook.lines.forEach(function(l,k){ var sp=document.createElement('span'); sp.textContent=l; if(k===1) sp.className='acc'; h.appendChild(sp); });
-    h.style.top = '-${Math.round(capH * 0.75)}px'; h.style.height = '${Math.round(capH * 0.7)}px'; h.style.fontSize = '${Math.round(big * 0.62)}px';
+    h.style.top = '${hookTop}px'; h.style.height = '${hookH}px'; h.style.fontSize = '${L.hook}px';
     cap.appendChild(h); show(h,0);
     tl.from(h.children[0],{y:40,opacity:0,duration:.3,ease:'back.out(1.7)'},0.06);
     if (h.children[1]) tl.from(h.children[1],{scale:.5,opacity:0,duration:.35,ease:'back.out(2.2)'},0.45);
@@ -742,15 +879,19 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   const raw = JSON.parse(readFileSync(join(dir, 'assets/raw.json'), 'utf8'));
   const style = { ...readStyle(), ...(edit.style || {}) };
   const src = edit.source;
+  validateEdit(edit);
   const tl = timeline(edit.segments, raw.words || [], edit.fixes || {}, edit.extra || []);
+  if (tl.dropped.length) log(`${tl.dropped.length} transcript word${tl.dropped.length > 1 ? 's' : ''} fell inside cuts: ${tl.dropped.map((d) => `"${d.text}"@${d.at}s`).join(', ')}`);
   const { hook, candidates } = chooseHook(edit, tl.words, style);
   const hookEnd = hook ? hook.end : 0;
   // Captions keep running under the hook card; the card sits above the caption zone.
-  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, 0, tl.duration), words: tl.words };
+  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, 0, tl.duration), words: tl.words, dropped: tl.dropped, network: [] };
+  if (edit.transcription?.provider === 'groq') plan.network.push('audio was sent to Groq for transcription');
   const formats = style.format === 'both' ? ['vertical', 'horizontal'] : [style.format];
   const useBrowser = (edit.style?.engine || opt.engine) === 'browser' || !hasFastFonts(fontsDir);
   log(`cut: ${src.duration.toFixed(1)}s -> ${tl.duration.toFixed(1)}s in ${tl.segments.length} pieces, ${tl.words.length} words, captions: ${style.captions}`);
-  const broll = Array.isArray(edit.broll) ? edit.broll : await fetchBroll(dir, tl, style, hookEnd);
+  const broll = Array.isArray(edit.broll) ? edit.broll : style.privacy === 'local' ? [] : await fetchBroll(dir, tl, style, hookEnd);
+  if (broll.length && !Array.isArray(edit.broll)) plan.network.push(`spoken key words were sent to ${broll[0].provider} to find stock clips`);
   buildVoice(dir, tl.segments, src.hasAudio, tl.duration);
   const mixInfo = buildMix(dir, plan, style, tl.duration);
   plan.gate = hookGate(plan, style, layoutFor(formats[0], src));
@@ -774,7 +915,14 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
     }
     let html = composition(plan, lay, style, fmt);
     if (fmt !== formats[0]) html = html.replace('src="assets/footage.mp4"', 'src="assets/footage-horizontal.mp4"').replace(/src="assets\//g, 'src="../assets/');
-    writeFileSync(join(dir, file), html);
+    // A hand-edited composition is never overwritten: the generated one goes beside it.
+    const target = join(dir, file), hashes = existsSync(join(dir, 'assets/generated.json')) ? JSON.parse(readFileSync(join(dir, 'assets/generated.json'), 'utf8')) : {};
+    const handEdited = existsSync(target) && hashes[file] && sha(readFileSync(target, 'utf8')) !== hashes[file];
+    if (handEdited) {
+      writeFileSync(target.replace(/\.html$/, '.generated.html'), html);
+      plan.handEdited = (plan.handEdited || []).concat(file);
+      log(`${file} was edited by hand and is kept; the new generated version is ${file.replace(/\.html$/, '.generated.html')}`);
+    } else { writeFileSync(target, html); hashes[file] = sha(html); writeFileSync(join(dir, 'assets/generated.json'), JSON.stringify(hashes)); }
     if (fmt === formats[0]) writeFileSync(join(dir, 'meta.json'), JSON.stringify({ id: 'reel', name: edit.slug, width: lay.w, height: lay.h, fps: FPS }, null, 2) + '\n');
     if (!doRender) continue;
     const suffix = fmt === 'horizontal' && formats.length > 1 ? '-horizontal' : '';
@@ -811,11 +959,14 @@ function notes(dir, edit, result, suggestions) {
     `Draft${outputs.length ? ': ' + outputs.map((o) => basename(o)).join(', ') : ' (not rendered)'}`,
     `Project: fable/video-projects/${edit.slug} (edit.json holds every decision; rebuild with \`node fable.mjs rebuild ${edit.slug}\`)`, '',
     '## What Fable did', '',
-    `- Cut ${src.duration.toFixed(1)} s down to ${plan.duration.toFixed(1)} s (removed ${removed.toFixed(1)} s of dead air${edit.deletes.some((d) => /stutter|retake/.test(d.reason)) ? ', stutters, and retakes' : ''}) in ${plan.segments.length} pieces, cutting only between phrases.`,
-    `- Captions: ${style.captions}${style.captions !== 'none' ? `, ${style.position} third, ${style.color}${style.captions !== 'subtitles' ? ` with ${style.accent} accents` : ''}` : ''}. ${plan.words.length} words timed to the voice.`,
+    `- Cut ${src.duration.toFixed(1)} s down to ${plan.duration.toFixed(1)} s (removed ${removed.toFixed(1)} s${(edit.removed || edit.deletes || []).some((d) => /stutter/.test(d.reason)) ? ' of dead air and stutters' : ' of dead air'}${(edit.removed || edit.deletes || []).some((d) => /retake/.test(d.reason)) ? ', plus retakes' : ''}) in ${plan.segments.length} pieces, cutting only where the audio is quiet.`,
+    `- Captions: ${style.captions}${style.captions !== 'none' ? `, ${style.position} third, ${style.color}${style.captions !== 'subtitles' ? ` with ${style.accent} accents` : ''}` : ''}. ${plan.words.length} of ${edit.transcription?.words ?? plan.words.length} transcript words kept${edit.transcription?.voicedSeconds ? `; ${(edit.transcription.words / edit.transcription.voicedSeconds).toFixed(1)} words per voiced second` : ''}${plan.dropped?.length ? `; ${plan.dropped.length} fell inside cuts` : ''}.`,
+    edit.transcription?.missed?.length ? `- LOW COVERAGE: voice with no transcript words at ${edit.transcription.missed.map((m) => `${fmt(m.start)}-${fmt(m.end)}`).join(', ')} (source time). Kept uncut. Listen there and add words with "extra" if needed.` : null,
     plan.hook ? `- Hook card for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}" (${plan.hook.pattern || 'custom'}: ${plan.hook.why || 'set by hand'}). Captions keep running under it.` : '- No hook text (per your style).',
     `- Format ${style.format}, color ${style.grade}${result.renders?.[0]?.engine?.startsWith('browser') ? ', slow push-in on every shot' : ''}.`,
-    result.renders?.length ? `- Rendered with ${result.renders.map((r) => r.engine + (r.seconds ? ` in ${r.seconds} s` : '')).join(' and ')}. Nothing left this computer.` : null,
+    result.renders?.length ? `- Rendered with ${result.renders.map((r) => r.engine + (r.seconds ? ` in ${r.seconds} s` : '')).join(' and ')}.` : null,
+    `- Privacy: ${plan.network?.length ? plan.network.join('; ') + '. Everything else stayed on this computer.' : 'nothing left this computer.'}${style.privacy === 'local' ? ' (local-only mode)' : ''}`,
+    plan.handEdited?.length ? `- ${plan.handEdited.join(', ')} was edited by hand and was kept; the freshly generated version sits beside it as *.generated.html. Render the hand-edited one with npx hyperframes render.` : null,
     `- Sound: ${style.sound === 'voice' ? 'voice only' : `${result.mixInfo.cues.length} soft effects`}${result.mixInfo.music ? `, music bed "${result.mixInfo.music}" ducked under the voice` : ''}, mastered to -14 LUFS.`,
     result.broll.length
       ? `- B-roll: ${result.broll.length} free stock clip${result.broll.length > 1 ? 's' : ''} on the words ${result.broll.map((b) => `"${b.query}" (${fmt(b.at)}, ${b.provider}, ${b.author || 'unknown'})`).join(', ')}. Sources in assets/broll/ledger.json. Your own clips in inbox/ beat stock: tell your agent which ones.`
@@ -874,19 +1025,29 @@ async function edit(video) {
   const pk = 960 / Math.max(norm.width, norm.height);
   ff(['-i', join(dir, 'assets/raw.mp4'), '-vf', `scale=${Math.round(norm.width * pk / 2) * 2}:${Math.round(norm.height * pk / 2) * 2}`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-an', '-movflags', '+faststart', join(dir, 'assets/proxy.mp4')]);
   let transcript = { words: [], audio_duration_secs: norm.duration };
-  if (info.hasAudio) { log('transcribing (free)'); transcript = transcribe(dir); }
+  const names = knownNames();
+  let provider = null;
+  if (info.hasAudio) { log(`transcribing (${style.privacy === 'local' ? 'local only' : 'free'})`); ({ transcript, provider } = transcribe(dir, style, names)); }
   else writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify(transcript));
   if (!existsSync(join(dir, 'assets/raw.json'))) writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify(transcript));
   const words = (transcript.words || []).filter((w) => w.text && w.end >= w.start);
-  const cuts = planCuts(words, norm.duration, style);
+  const renamed = applyNames(words, names);
+  if (renamed) { log(`${renamed} word${renamed > 1 ? 's' : ''} snapped to a known name`); writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify({ ...transcript, words }, null, 2)); }
+  // Cuts need two opinions: the transcript (where words are) and the audio (where it is really quiet).
+  const { silences, noise } = info.hasAudio ? detectSilenceAdaptive(join(dir, 'assets/raw.mp4'), words, style.pace === 'tight' ? 0.42 : 0.8) : { silences: [{ start: 0, end: norm.duration }], noise: null };
+  if (noise !== null) log(`silence floor ${noise} dB: ${silences.length} quiet stretches`);
+  const cuts = planCuts(words, norm.duration, style, silences, names);
+  const missed = info.hasAudio ? untranscribed(words, silences, norm.duration) : [];
+  if (missed.length) log(`voice without words at ${missed.map((m) => `${m.start}-${m.end}s`).join(', ')}: kept, check the transcript there`);
   const editDoc = {
     version: 1, slug, created: new Date().toISOString(),
     source: { file: source, duration: norm.duration, width: norm.width, height: norm.height, hasAudio: info.hasAudio },
+    transcription: { provider, words: words.length, voicedSeconds: r3(norm.duration - silences.reduce((a, s) => a + (Math.min(s.end, norm.duration) - s.start), 0)), missed },
     style: {}, segments: cuts.keeps.map((k) => ({ src0: r3(k.src0), src1: r3(k.src1) })),
-    deletes: cuts.deletes.map((d) => ({ start: r3(d.start), end: r3(d.end), reason: d.reason })),
+    removed: cuts.deletes.map((d) => ({ start: r3(d.start), end: r3(d.end), reason: d.reason })),
     suggestions: cuts.suggestions.map((s) => ({ ...s, start: r3(s.start), end: r3(s.end) })),
     fixes: {},
-    _help: 'segments: kept source ranges in order (seconds). fixes: {"<word index in raw.json>": "new text" or ""}. extra: [{"text":"Amen.","start":s,"end":s}] in source time for words the transcript missed. hook: a candidate number from the notes, {"lines":[..],"end":s}, or null for none. style: overrides for format/captions/position/color/accent/hook/pace/grade/sound/broll/engine (fast|browser). broll: the stock inserts (delete one to drop it, [] for none, remove the key to search again). assets/plan.json is the computed result: read it, do not edit it.',
+    _help: 'EDIT THESE: segments (kept source ranges in order, seconds; the only thing that decides the cut), fixes {"<word index in raw.json>": "new text" or ""}, extra [{"text":"Amen.","start":s,"end":s}] in source time for words the transcript missed, hook (a candidate number from the notes, {"lines":[..],"end":seconds}, or null), style (overrides: format/captions/position/color/accent/hook/pace/grade/sound/broll/retakes/stutters/privacy/engine fast|browser), broll (delete one to drop it, [] for none, remove the key to search again). READ ONLY: source, transcription, removed, suggestions (what Fable did and saw; editing them changes nothing). assets/plan.json is the computed result.',
   };
   writeFileSync(join(dir, 'edit.json'), JSON.stringify(editDoc, null, 2));
   const result = await build(dir, editDoc, { quality: opt.quality, render: !opt['no-render'] });
@@ -898,6 +1059,21 @@ async function edit(video) {
   return { slug, outputs: result.outputs };
 }
 
+// edit.json is hand-edited, so it is checked before it is trusted. Problems stop the build with a
+// plain message; things that are merely ignored get a warning.
+const KNOWN_KEYS = new Set(['version', 'slug', 'created', 'source', 'transcription', 'style', 'segments', 'removed', 'deletes', 'suggestions', 'fixes', 'extra', 'hook', 'broll', '_help']);
+function validateEdit(doc) {
+  const d = doc.source?.duration;
+  if (!Array.isArray(doc.segments) || !doc.segments.length) die('edit.json: segments must be a non-empty list of {src0, src1}');
+  doc.segments.forEach((s, i) => {
+    if (!(Number.isFinite(s.src0) && Number.isFinite(s.src1) && s.src1 > s.src0)) die(`edit.json: segment ${i} needs numeric src0 < src1 (seconds)`);
+    if (d && (s.src0 < 0 || s.src1 > d + 0.05)) die(`edit.json: segment ${i} (${s.src0}-${s.src1}) is outside the source (0-${d})`);
+    if (i && s.src0 < doc.segments[i - 1].src1 - 0.001) die(`edit.json: segments ${i - 1} and ${i} overlap or are out of order`);
+  });
+  for (const k of Object.keys(doc)) if (!KNOWN_KEYS.has(k)) log(`edit.json: "${k}" is not something Fable reads`);
+  if (doc.deletes) log('edit.json: "deletes" is a record of what Fable removed, not an instruction; edit "segments" to change the cut');
+  if (doc.hook && typeof doc.hook === 'object' && !Array.isArray(doc.hook.lines)) die('edit.json: hook must be a candidate number, null, or {"lines": [...], "end": seconds}');
+}
 function loadEdit(slug) {
   const dir = join(projects, slug);
   const p = join(dir, 'edit.json');
@@ -906,7 +1082,14 @@ function loadEdit(slug) {
 }
 async function rebuild(slug, finalRender = false) {
   const { dir, edit: doc } = loadEdit(slug);
+  const before = existsSync(join(dir, 'assets/plan.json')) ? JSON.parse(readFileSync(join(dir, 'assets/plan.json'), 'utf8')) : null;
   const result = await build(dir, doc, { quality: finalRender ? (opt.quality === 'draft' ? 'standard' : opt.quality) : opt.quality, render: !opt['no-render'], finalName: finalRender });
+  // A rebuild that changed nothing should look like one.
+  if (before) {
+    const p = result.plan, same = before.duration === p.duration && before.segments.length === p.segments.length && before.words.length === p.words.length && JSON.stringify(before.hook) === JSON.stringify(p.hook) && JSON.stringify(before.captions) === JSON.stringify(p.captions);
+    log(same ? 'rebuild: nothing changed in the cut, captions, or hook (edit segments, fixes, extra, hook, or style to change the video)'
+      : `rebuild: pieces ${before.segments.length} -> ${p.segments.length}, duration ${before.duration}s -> ${p.duration}s, words ${before.words.length} -> ${p.words.length}, hook end ${before.hook?.end ?? '-'} -> ${p.hook?.end ?? '-'}`);
+  }
   doc.broll = result.broll;
   writeFileSync(join(dir, 'edit.json'), JSON.stringify(doc, null, 2));
   notes(dir, doc, result, doc.suggestions || []);
@@ -966,13 +1149,18 @@ function status() {
   }
 }
 
-switch (command) {
-  case 'edit': if (!target) die('usage: node fable.mjs edit <video>'); await edit(target); break;
-  case 'rebuild': if (!target) die('usage: node fable.mjs rebuild <slug>'); await rebuild(target); break;
-  case 'final': if (!target) die('usage: node fable.mjs final <slug>'); await rebuild(target, true); break;
-  case 'watch': watch(); break;
-  case 'status': status(); break;
-  default:
-    console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 11).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
-    process.exit(command ? 1 : 0);
+export { planCuts, timeline, buildCaptions, hookCandidates, chooseHook, hookGate, insideSilence, untranscribed, layoutFor, readStyle };
+
+const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  switch (command) {
+    case 'edit': if (!target) die('usage: node fable.mjs edit <video>'); await edit(target); break;
+    case 'rebuild': if (!target) die('usage: node fable.mjs rebuild <slug>'); await rebuild(target); break;
+    case 'final': if (!target) die('usage: node fable.mjs final <slug>'); await rebuild(target, true); break;
+    case 'watch': watch(); break;
+    case 'status': status(); break;
+    default:
+      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 12).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+      process.exit(command ? 1 : 0);
+  }
 }

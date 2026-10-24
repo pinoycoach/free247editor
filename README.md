@@ -7,7 +7,10 @@ agent or on its own. Formerly free247editor.
 
 Drop a raw video in the inbox. A minute or two later a cut, captioned, mixed draft is in the
 outbox, with notes on what was done. Captions and the hook are drawn by FFmpeg, so a draft
-renders in seconds on a plain laptop. Give notes in plain words (English, Tagalog, Taglish),
+renders in seconds on a plain laptop. Local by default: the only things that ever leave your
+computer are the audio sent to Groq for free transcription (if you chose Groq) and key words
+sent to Pixabay or Pexels (if you turned on stock B-roll). A "Privacy: local only" line in your
+rules switches both off. Give notes in plain words (English, Tagalog, Taglish),
 the way you would to a human editor. Lasting notes become rules it follows on every future
 edit, so it learns your style. Nothing is uploaded anywhere.
 
@@ -81,7 +84,7 @@ YouTube and it gets its own framing and text placement.
 
 | | |
 | --- | --- |
-| Cuts | Removes dead air, stutters, and clear retakes, cutting only between phrases at real silence, frame-aligned so lips stay in sync |
+| Cuts | Removes dead air and stutters, cutting only where the audio is measured quiet, frame-aligned so lips stay in sync. Repeated lines are listed as possible retakes for you to decide (or "Retakes: cut" in your rules) |
 | Captions | Word by word, bold key words, key-word pills, or subtitles, in your position and colors, timed to each word |
 | Hook | Up to three openings taken from your own words (claim, question, strongest word), one chosen, all listed in the notes with objective checks and a nine-frame muted-view sheet |
 | B-roll | Optional: free stock clips from Pixabay or Pexels cut in on the key words, every source logged; your own extra clips win |
@@ -90,7 +93,7 @@ YouTube and it gets its own framing and text placement.
 | Sound | Soft taps and clicks on real cuts, a music bed from `my-sounds` ducked under your voice, mastered to -14 LUFS |
 | Judgment | Doubtful cuts are left in and listed in the notes for you to decide |
 | Agent extras | Motion cards, B-roll, zoom-ins, payoffs, built on the same timeline (`plan.json`) and rendered through Chrome only when asked |
-| Private | No telemetry, no update checks, no uploads; the render cache is off and temp files are cleaned after every job |
+| Private | No telemetry, no update checks; the notes say exactly what left the computer (Groq audio, stock key words) or that nothing did; render cache off, temp files cleaned after every job |
 | Learning | Your notes are saved as rules in `my-rules.md` and applied every time |
 | 24/7 | `node fable.mjs watch` edits everything that lands in the inbox |
 
@@ -155,15 +158,17 @@ fable/
   fable/             the engine: skills, scripts, style library, and your projects
 ```
 
-Your footage, renders, style, rules, and key are in `.gitignore` and never leave your computer.
+Your footage, renders, style, rules, and keys are in `.gitignore`. Nothing is uploaded except
+what you opted into (Groq transcription, stock B-roll), and each notes file says which.
 
 ## Credits
 
 The engine in `fable/` began as a fork of [Herk Edit Kit](https://github.com/nateherkai/herk-edit-kit)
 by Nate Herk (MIT), built on [HyperFrames](https://github.com/heygen-com/hyperframes) and
 [GSAP](https://gsap.com/). Fable removed its brand assets, example projects, and paid-service
-scripts, and added free transcription and the autopilot. See `fable/README.md` and
-`fable/licenses/`. Fable is not affiliated with Nate Herk, HeyGen, or any of the AI agent makers.
+scripts (the remaining skills still mention paid services as options; none is called without
+asking), and added free transcription and the autopilot. Parts of the engine are under the kit's
+own pipeline-use permission, kept in `fable/licenses/`. See `fable/README.md`. Fable is not affiliated with Nate Herk, HeyGen, or any of the AI agent makers.
 
 ## License
 

@@ -5,6 +5,11 @@ description: Design and build a 10-30 second motion-design showreel or brand ree
 
 # Motion Showreel
 
+> Fable note: the paid helpers `scripts/kie.mjs` (Kie.ai video and images) and `scripts/sfx.mjs`
+> (ElevenLabs sound effects) are not shipped. Use the user's own music and sounds from `my-sounds/`,
+> or FFmpeg-made effects. Any paid generation needs the user's explicit yes first.
+
+
 A showreel promises that every frame was a decision. This skill turns that into a
 repeatable build: pick one motif, push it through six or seven craft chapters that
 each look nothing alike, cut on the beat, and end on the motif.

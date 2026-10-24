@@ -1,0 +1,12 @@
+{
+  "name": "fable",
+  "private": true,
+  "type": "module",
+  "description": "Fable: a free, private video editor that runs on your own computer, 24/7, inside your AI coding agent or on its own.",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "edit": "node fable.mjs edit",
+    "watch": "node fable.mjs watch"
+  },
+  "engines": { "node": ">=22" }
+}

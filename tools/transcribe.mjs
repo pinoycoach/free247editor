@@ -15,11 +15,11 @@ import { parseArgs } from 'node:util';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const { values: opts, positionals: [video] } = parseArgs({
   allowPositionals: true,
-  options: { local: { type: 'boolean' }, model: { type: 'string', default: 'large-v3' } },
+  options: { local: { type: 'boolean' }, model: { type: 'string', default: 'large-v3' }, prompt: { type: 'string', default: '' } },
 });
-const { local, model } = opts;
+const { local, model, prompt } = opts;
 if (!video || !existsSync(video)) {
-  console.error('Usage: node tools/transcribe.mjs <video> [--local] [--model large-v3]');
+  console.error('Usage: node tools/transcribe.mjs <video> [--local] [--model large-v3] [--prompt "names, brand words"]');
   process.exit(1);
 }
 try { process.loadEnvFile(join(root, '.env')); } catch {}
@@ -36,7 +36,7 @@ const duration = Number(run('ffprobe', ['-v', 'error', '-show_entries', 'format=
 
 let words;
 if (local) {
-  const json = run('python', [join(root, 'tools', 'transcribe_local.py'), resolve(video), model]);
+  const json = run('python', [join(root, 'tools', 'transcribe_local.py'), resolve(video), model, prompt]);
   words = JSON.parse(json);
 } else {
   if (!process.env.GROQ_API_KEY) {
@@ -52,6 +52,8 @@ if (local) {
   form.append('model', 'whisper-large-v3');
   form.append('response_format', 'verbose_json');
   form.append('timestamp_granularities[]', 'word');
+  // Names and brand words steer the decoder (Whisper's prompt). Free, and it fixes "Stevie" for "Phi Phi".
+  if (prompt) form.append('prompt', prompt.slice(0, 800));
   const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
     method: 'POST',
     headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },

@@ -281,7 +281,7 @@ function planCuts(words, duration, style) {
 }
 
 // Frame-aligned segments and the words that survive on the new timeline.
-function timeline(keeps, words, fixes = {}) {
+function timeline(keeps, words, fixes = {}, extras = []) {
   let t = 0;
   const segments = keeps.map((k) => {
     const f0 = frames(k.src0), n = Math.max(1, frames(k.src1) - f0);
@@ -301,6 +301,13 @@ function timeline(keeps, words, fixes = {}) {
     const end = Math.min(start + (w.end - w.start), seg.out1);
     kept.push({ i, text: fix ?? w.text, start: r3(start), end: r3(Math.max(end, start + 0.05)), src: w.start });
   });
+  // Words the transcript missed, added by hand in edit.json as { text, start, end } in source time.
+  for (const x of extras) {
+    const start = toOut(x.start);
+    if (start === null || !x.text) continue;
+    kept.push({ i: 'extra', text: x.text, start: r3(start), end: r3(start + Math.max(0.2, (x.end || x.start + 0.5) - x.start)), src: x.start });
+  }
+  kept.sort((a, b) => a.start - b.start);
   return { segments, duration, words: kept };
 }
 
@@ -726,7 +733,7 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   const raw = JSON.parse(readFileSync(join(dir, 'assets/raw.json'), 'utf8'));
   const style = { ...readStyle(), ...(edit.style || {}) };
   const src = edit.source;
-  const tl = timeline(edit.segments, raw.words || [], edit.fixes || {});
+  const tl = timeline(edit.segments, raw.words || [], edit.fixes || {}, edit.extra || []);
   const { hook, candidates } = chooseHook(edit, tl.words, style);
   const hookEnd = hook ? hook.end : 0;
   // Captions keep running under the hook card; the card sits above the caption zone.
@@ -870,7 +877,7 @@ async function edit(video) {
     deletes: cuts.deletes.map((d) => ({ start: r3(d.start), end: r3(d.end), reason: d.reason })),
     suggestions: cuts.suggestions.map((s) => ({ ...s, start: r3(s.start), end: r3(s.end) })),
     fixes: {},
-    _help: 'segments: kept source ranges in order (seconds). fixes: {"<word index in raw.json>": "new text" or ""}. hook: a candidate number from the notes, {"lines":[..],"end":s}, or null for none. style: overrides for format/captions/position/color/accent/hook/pace/grade/sound/broll/engine (fast|browser). broll: the stock inserts (delete one to drop it, [] for none, remove the key to search again). assets/plan.json is the computed result: read it, do not edit it.',
+    _help: 'segments: kept source ranges in order (seconds). fixes: {"<word index in raw.json>": "new text" or ""}. extra: [{"text":"Amen.","start":s,"end":s}] in source time for words the transcript missed. hook: a candidate number from the notes, {"lines":[..],"end":s}, or null for none. style: overrides for format/captions/position/color/accent/hook/pace/grade/sound/broll/engine (fast|browser). broll: the stock inserts (delete one to drop it, [] for none, remove the key to search again). assets/plan.json is the computed result: read it, do not edit it.',
   };
   writeFileSync(join(dir, 'edit.json'), JSON.stringify(editDoc, null, 2));
   const result = await build(dir, editDoc, { quality: opt.quality, render: !opt['no-render'] });

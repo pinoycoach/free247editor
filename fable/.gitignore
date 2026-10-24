@@ -1,0 +1,8 @@
+# Engine: packages and the user's edits stay local
+node_modules/
+video-projects/*
+!video-projects/.gitkeep
+.env
+*.log
+tmp/
+__pycache__/

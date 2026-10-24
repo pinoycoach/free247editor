@@ -1,8 +1,7 @@
-# free247editor
+# Fable
 
-This folder is the user's personal video editor. They record; you edit.
+This folder is the user's personal video editor, Fable. They record; Fable edits.
 
-Everything you do here follows the `free247editor` skill in
-`.agents/skills/free247editor/SKILL.md`. If your agent has not loaded it yet, read it before
-you act on "start", "edit this", a dropped or new video, notes on a draft, or anything about
-the user's style or rules.
+Everything you do here follows the `fable` skill in `.agents/skills/fable/SKILL.md`. If your
+agent has not loaded it yet, read it before you act on "start", "edit this", a dropped or new
+video, notes on a draft, or anything about the user's style or rules.

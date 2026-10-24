@@ -1,6 +1,11 @@
 # Installed by setup.mjs on each computer
-kit/
+fable/node_modules/
+fable/video-projects/*
+!fable/video-projects/.gitkeep
 node_modules/
+.fable/
+# The engine folder from before Fable had its own
+kit/
 
 # Your footage, renders, style, rules, and keys stay local
 .env

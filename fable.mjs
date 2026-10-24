@@ -844,6 +844,11 @@ async function edit(video) {
   log(`normalizing to ${tw}x${th} @ ${FPS} fps`);
   ff(['-i', source, '-map', '0:v:0', ...audioArgs, '-vf', `scale=${tw}:${th}:flags=lanczos`, '-r', String(FPS), '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', join(dir, 'assets/raw.mp4')]);
   const norm = probe(join(dir, 'assets/raw.mp4'));
+  // A file that is still copying, or stopped copying, has a full header and a short body.
+  if (info.duration - norm.duration > 1.0) {
+    rmSync(dir, { recursive: true, force: true });
+    die(`${basename(source)} is incomplete: its header says ${info.duration.toFixed(1)} s but only ${norm.duration.toFixed(1)} s can be read. The copy into inbox/ was cut short. Copy the file again (wait for the transfer to finish) and try once more.`);
+  }
   // A small proxy for anything that only needs to look: frame checks, contact sheets, agents.
   const pk = 960 / Math.max(norm.width, norm.height);
   ff(['-i', join(dir, 'assets/raw.mp4'), '-vf', `scale=${Math.round(norm.width * pk / 2) * 2}:${Math.round(norm.height * pk / 2) * 2}`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-an', '-movflags', '+faststart', join(dir, 'assets/proxy.mp4')]);

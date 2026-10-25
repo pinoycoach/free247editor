@@ -116,3 +116,21 @@ test('a scoped rule fires only for the media it names', () => {
   assert.equal(ruleApplies('- Pace: tight', tutorial), true);
   assert.equal(ruleApplies('- [9:16] Hook: always', null), true);
 });
+
+test('script-aware captions: the script spelling wins, missed words are inserted, guesses dropped', async () => {
+  const { alignScript, hookFromScript } = await import('../tools/script-align.mjs');
+  // Transcript heard "Stevie" for "Phi Phi", merged "pray na" into "prayna", missed "Amen", added a stray "uh".
+  const heard = [W('How', 0, 0.3), W('does', 0.35, 0.5), W('Stevie', 0.55, 0.9), W('pray?', 0.95, 1.3), W('uh', 1.4, 1.5), W('In', 2.0, 2.2), W('the', 2.25, 2.4), W('name', 2.45, 2.7), W('of', 2.75, 2.85), W('the', 2.9, 3.0), W('Father.', 3.05, 3.5), W('Ayaw.', 5.0, 5.4)];
+  const script = 'Hook: How does Phi Phi pray?\nHow does Phi Phi pray?\nIn the name of the Father. Amen.\nAyaw.';
+  const r = alignScript(heard, script);
+  const fixed = heard.map((w, i) => r.fixes[String(i)] ?? w.text).filter((t) => t !== '');
+  const shown = [...fixed, ...r.extra.map((x) => x.text)];
+  assert.ok(shown.filter((t) => t === 'Phi').length === 2 && !shown.includes('Stevie'), 'name taken from the script, in place of the guess');
+  assert.ok(!shown.includes('uh'), 'stray guess dropped');
+  const phi = r.extra.filter((x) => x.text === 'Phi');
+  if (phi.length) assert.ok(phi.every((x) => x.start >= 0.5 && x.end <= 0.95), 'inserted name sits where the guess was');
+  assert.ok(r.extra.some((x) => x.text === 'Amen.' && x.start >= 3.5 && x.end <= 5.0), 'Amen inserted between Father and Ayaw');
+  assert.ok(r.stats.matched >= 9);
+  assert.equal(hookFromScript(script), 'How does Phi Phi pray?');
+  assert.equal(hookFromScript('Line one here.\nLine two.'), 'Line one here');
+});

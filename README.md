@@ -86,6 +86,7 @@ YouTube and it gets its own framing and text placement.
 | --- | --- |
 | Cuts | Removes dead air and stutters, cutting only where the audio is measured quiet, frame-aligned so lips stay in sync. Repeated lines are listed as possible retakes for you to decide (or "Retakes: cut" in your rules) |
 | Captions | Word by word, bold key words, key-word pills, or subtitles, in your position and colors, timed to each word |
+| Script | Put `video.txt` beside `video.mp4` and the captions follow your words exactly, timed to the voice, with missed words inserted; the hook comes from the script's first line |
 | Hook | Up to three openings taken from your own words (claim, question, strongest word), one chosen, all listed in the notes with objective checks and a nine-frame muted-view sheet |
 | B-roll | Optional: free stock clips from Pixabay or Pexels cut in on the key words, every source logged; your own extra clips win |
 | Face | With OpenCV installed, finds the face at 2 fps (230 KB model, CPU) and keeps captions and the hook card off it, measured and reported in the notes |

@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 // Fable autopilot: a raw recording in, a cut, captioned, mixed draft out. No agent in the loop.
 //
-//   node fable.mjs edit <video> [--slug name] [--format vertical|horizontal|both] [--quality draft|standard|high]
+//   node fable.mjs edit <video> [--slug name] [--script words.txt] [--format vertical|horizontal|both] [--quality draft|standard|high]
+//       A script beside the video (same name, .txt or .md) is picked up on its own: captions then
+//       show the script's words at the moment they were said, and the hook comes from its first line.
 //   node fable.mjs rebuild <slug> [--quality ...]   after editing fable/video-projects/<slug>/edit.json
 //   node fable.mjs final <slug>                      standard-quality render to outbox/<slug>-final.mp4
 //   node fable.mjs watch [--every 5] [--once]        24/7: edit every new video that lands in inbox/
@@ -19,6 +21,7 @@ import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { captionLayout, hasFastFonts, renderFast, reviewSheets } from './tools/fast-render.mjs';
+import { alignScript, hookFromScript } from './tools/script-align.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -40,6 +43,7 @@ const { values: opt, positionals } = parseArgs({
     slug: { type: 'string' }, format: { type: 'string' }, quality: { type: 'string', default: 'draft' },
     every: { type: 'string', default: '5' }, once: { type: 'boolean' }, 'no-render': { type: 'boolean' },
     engine: { type: 'string', default: 'fast' },
+    script: { type: 'string' },
   },
 });
 const [command, target] = positionals;
@@ -565,9 +569,17 @@ function hookGate(plan, style, lay) {
   return checks;
 }
 
-function chooseHook(edit, words, style) {
+function chooseHook(edit, words, style, scriptText = null) {
   if (!style.hook || edit.hook === null) return { hook: null, candidates: [] };
   const candidates = hookCandidates(words, edit.slug);
+  // A script's first line (or a "Hook:" line) is what the author meant the opening to be.
+  if (scriptText) {
+    const line = hookFromScript(scriptText);
+    if (line) {
+      const ws = compress(line.split(/\s+/).map((t) => ({ text: t })), 8);
+      if (ws.length) candidates.unshift({ pattern: 'script', text: ws.join(' '), lines: toLines(ws), source: [], from: 0, payoff: words[0]?.end || 0, why: 'the first line of your script' });
+    }
+  }
   let hook = null;
   if (edit.hook && typeof edit.hook === 'object') hook = { ...edit.hook };
   else if (typeof edit.hook === 'number' && candidates[edit.hook]) hook = { ...candidates[edit.hook] };
@@ -953,7 +965,8 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   validateEdit(edit);
   const tl = timeline(edit.segments, raw.words || [], edit.fixes || {}, edit.extra || []);
   if (tl.dropped.length) log(`${tl.dropped.length} transcript word${tl.dropped.length > 1 ? 's' : ''} fell inside cuts: ${tl.dropped.map((d) => `"${d.text}"@${d.at}s`).join(', ')}`);
-  const { hook, candidates } = chooseHook(edit, tl.words, style);
+  const scriptFile = edit.script?.file && [join(dirname(edit.source.file), edit.script.file)].find((p) => existsSync(p));
+  const { hook, candidates } = chooseHook(edit, tl.words, style, scriptFile ? readFileSync(scriptFile, 'utf8') : null);
   const hookEnd = hook ? hook.end : 0;
   // Captions keep running under the hook card; the card sits above the caption zone.
   const facePath = join(dir, 'assets/face.json');
@@ -1039,6 +1052,7 @@ function notes(dir, edit, result, suggestions) {
     '## What Fable did', '',
     `- Cut ${src.duration.toFixed(1)} s down to ${plan.duration.toFixed(1)} s (removed ${removed.toFixed(1)} s${(edit.removed || edit.deletes || []).some((d) => /stutter/.test(d.reason)) ? ' of dead air and stutters' : ' of dead air'}${(edit.removed || edit.deletes || []).some((d) => /retake/.test(d.reason)) ? ', plus retakes' : ''}) in ${plan.segments.length} pieces, cutting only where the audio is quiet.`,
     `- Captions: ${style.captions}${style.captions !== 'none' ? `, ${style.position} third, ${style.color}${style.captions !== 'subtitles' ? ` with ${style.accent} accents` : ''}` : ''}. ${plan.words.length} of ${edit.transcription?.words ?? plan.words.length} transcript words kept${edit.transcription?.voicedSeconds ? `; ${(edit.transcription.words / edit.transcription.voicedSeconds).toFixed(1)} words per voiced second` : ''}${plan.dropped?.length ? `; ${plan.dropped.length} fell inside cuts` : ''}.`,
+    edit.script ? `- Script "${edit.script.file}": ${edit.script.matched} of ${edit.script.script} words matched; ${edit.script.changed} shown as written, ${edit.script.inserted} inserted where the model missed them, ${edit.script.dropped} transcript words not in the script left uncaptioned (the footage is untouched; cut it with segments if it should go).` : null,
     edit.transcription?.missed?.length ? `- LOW COVERAGE: voice with no transcript words at ${edit.transcription.missed.map((m) => `${fmt(m.start)}-${fmt(m.end)}`).join(', ')} (source time). Kept uncut. Listen there and add words with "extra" if needed.` : null,
     plan.hook ? `- Hook card for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}" (${plan.hook.pattern || 'custom'}: ${plan.hook.why || 'set by hand'}). Captions keep running under it.` : '- No hook text (per your style).',
     `- Format ${style.format}, color ${style.grade}${result.renders?.[0]?.engine?.startsWith('browser') ? ', slow push-in on every shot' : ''}.`,
@@ -1116,7 +1130,19 @@ async function edit(video) {
   if (info.hasAudio) { log(`transcribing (${style.privacy === 'local' ? 'local only' : 'free'})`); ({ transcript, provider } = transcribe(dir, style, names)); }
   else writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify(transcript));
   if (!existsSync(join(dir, 'assets/raw.json'))) writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify(transcript));
-  const words = (transcript.words || []).filter((w) => w.text && w.end >= w.start);
+  // Speech models sometimes emit a word out of time order; everything downstream assumes time order.
+  const words = (transcript.words || []).filter((w) => w.text && w.end >= w.start).sort((a, b) => a.start - b.start);
+  for (let i = 1; i < words.length; i++) if (words[i].start < words[i - 1].end) { const mid = r3((words[i].start + words[i - 1].end) / 2); words[i - 1].end = Math.max(words[i - 1].start + 0.05, mid); words[i].start = Math.max(words[i].start, words[i - 1].end); words[i].end = Math.max(words[i].end, words[i].start + 0.05); }
+  // A script beside the video (same name .txt/.md, or --script) is the truth for the words.
+  const scriptPath = opt.script || ['.txt', '.md', '.script.txt'].map((e) => source.replace(/\.[^.]+$/, e)).find((p) => existsSync(p)) || null;
+  let scriptInfo = null, scriptText = null;
+  if (scriptPath && words.length) {
+    scriptText = readFileSync(scriptPath, 'utf8');
+    const a = alignScript(words, scriptText);
+    scriptInfo = { file: basename(scriptPath), ...a.stats };
+    log(`script: ${a.stats.matched}/${a.stats.script} words matched, ${a.stats.changed} spelled as written, ${a.stats.inserted} inserted, ${a.stats.dropped} dropped`);
+    var scriptFixes = a.fixes, scriptExtra = a.extra;
+  }
   const renamed = applyNames(words, names);
   if (renamed) { log(`${renamed} word${renamed > 1 ? 's' : ''} snapped to a known name`); writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify({ ...transcript, words }, null, 2)); }
   // Cuts need two opinions: the transcript (where words are) and the audio (where it is really quiet).
@@ -1132,7 +1158,8 @@ async function edit(video) {
     style: {}, segments: cuts.keeps.map((k) => ({ src0: r3(k.src0), src1: r3(k.src1) })),
     removed: cuts.deletes.map((d) => ({ start: r3(d.start), end: r3(d.end), reason: d.reason })),
     suggestions: cuts.suggestions.map((s) => ({ ...s, start: r3(s.start), end: r3(s.end) })),
-    fixes: {},
+    fixes: scriptFixes || {}, extra: scriptExtra || [],
+    script: scriptInfo,
     _help: 'EDIT THESE: segments (kept source ranges in order, seconds; the only thing that decides the cut), fixes {"<word index in raw.json>": "new text" or ""}, extra [{"text":"Amen.","start":s,"end":s}] in source time for words the transcript missed, hook (a candidate number from the notes, {"lines":[..],"end":seconds}, or null), style (overrides: format/captions/position/color/accent/hook/pace/grade/sound/broll/retakes/stutters/privacy/engine fast|browser), broll (delete one to drop it, [] for none, remove the key to search again). READ ONLY: source, transcription, removed, suggestions (what Fable did and saw; editing them changes nothing). assets/plan.json is the computed result.',
   };
   writeFileSync(join(dir, 'edit.json'), JSON.stringify(editDoc, null, 2));
@@ -1147,7 +1174,7 @@ async function edit(video) {
 
 // edit.json is hand-edited, so it is checked before it is trusted. Problems stop the build with a
 // plain message; things that are merely ignored get a warning.
-const KNOWN_KEYS = new Set(['version', 'slug', 'created', 'source', 'transcription', 'style', 'segments', 'removed', 'deletes', 'suggestions', 'fixes', 'extra', 'hook', 'broll', '_help']);
+const KNOWN_KEYS = new Set(['version', 'slug', 'created', 'source', 'transcription', 'script', 'style', 'segments', 'removed', 'deletes', 'suggestions', 'fixes', 'extra', 'hook', 'broll', '_help']);
 function validateEdit(doc) {
   const d = doc.source?.duration;
   if (!Array.isArray(doc.segments) || !doc.segments.length) die('edit.json: segments must be a non-empty list of {src0, src1}');

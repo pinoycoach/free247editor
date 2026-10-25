@@ -137,6 +137,16 @@ API). The default is to use none of them.
 5. Open the draft. Tell the user in 3 to 5 short bullets what you did (the notes file has the
    numbers), list anything the autopilot left in for them to decide, then ask for notes.
 
+## A script with the video
+
+If the user wrote the words, put them in a text file with the same name as the video
+(`talk.mp4` and `talk.txt`) in `inbox/`, or pass `--script <file>`. Fable then aligns the
+transcript to the script: captions show the script's spelling at the moment each word was
+said, words the model missed are inserted in their place, and the model's stray guesses are
+dropped. A first line `Hook: ...` (or simply the first line) becomes the first hook candidate.
+The notes report how many words matched. When the user pastes a script in chat, save it as
+that file first, then run the edit; do not retype captions by hand.
+
 ## Notes become rules
 
 - Apply each note, render the next version (`-v2`, `-v3`, ...), and open it. Most notes are a

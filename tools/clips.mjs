@@ -43,6 +43,14 @@ export function scoreClips(words, { silences = [], dirty = [], min = 25, max = 6
       const n = slice.reduce((a, p) => a + p.n, 0);
       const wps = n / Math.max(1, spoken);                   // words per spoken second
       const deadAir = 1 - spoken / dur;
+      // Real speech, not a speech model guessing over music or silence: enough words, enough
+      // different words, a human pace, and no single word making up a third of the window.
+      const toks = slice.flatMap((p) => p.text.split(/\s+/).map(token)).filter(Boolean);
+      const distinct = new Set(toks).size;
+      const counts = new Map();
+      for (const t of toks) counts.set(t, (counts.get(t) || 0) + 1);
+      const top = Math.max(0, ...counts.values());
+      if (n < 30 || distinct < 20 || wps < 1.5 || wps > 5 || top > toks.length * 0.33) continue;
       const first = slice[0].text;
       let hook = STRONG.test(first) ? 26 : SOFT.test(first) ? 16 : STRONG.test(slice[1]?.text || '') ? 12 : 8;
       if (/\d/.test(first)) hook += 6;

@@ -314,7 +314,9 @@ function knownNames() {
   const p = join(root, 'my-rules.md');
   if (!existsSync(p)) return [];
   const names = new Set();
-  for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) if (/^\s*-?\s*names?:/i.test(line)) for (const m of line.matchAll(/"([^"]+)"/g)) names.add(m[1]);
+  // Only the quoted names before any parenthesised note, and only short ones: "Phi Phi" yes,
+  // a quoted sentence from the user's words no (it would be fed to the speech model as vocabulary).
+  for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) if (/^\s*-?\s*names?:/i.test(line)) for (const m of line.split('(')[0].matchAll(/"([^"]+)"/g)) if (m[1].trim().split(/\s+/).length <= 3) names.add(m[1].trim());
   return [...names];
 }
 

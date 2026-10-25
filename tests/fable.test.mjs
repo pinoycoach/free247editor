@@ -138,3 +138,15 @@ test('clips: a self-contained moment with a hook and a finished ending outranks 
   assert.ok(/hook/.test(best.why) && /finished line/.test(best.why));
   assert.ok(r.top.every((c) => c.duration >= 10 && c.duration <= 40));
 });
+
+test('clips: hallucinated or repetitive transcripts yield no clips', async () => {
+  const { scoreClips } = await import('../tools/clips.mjs');
+  // "you" every 3 s for 2 minutes, the way a speech model fills music.
+  const you = Array.from({ length: 40 }, (_, k) => W('you', k * 3, k * 3 + 0.2));
+  assert.equal(scoreClips(you, { min: 20, max: 60, count: 3 }).top.length, 0);
+  // The same sentence looped: plenty of words, too few distinct ones.
+  const loop = [];
+  let t = 0;
+  for (let k = 0; k < 12; k++) for (const w of 'I know I spoke too soft and I do not know how'.split(' ')) { loop.push(W(w, +t.toFixed(2), +(t + 0.25).toFixed(2))); t += 0.4; }
+  assert.equal(scoreClips(loop, { min: 20, max: 60, count: 3 }).top.length, 0);
+});

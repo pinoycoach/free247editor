@@ -14,7 +14,7 @@
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { tmpdir } from 'node:os';
+import { freemem, tmpdir, totalmem } from 'node:os';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
@@ -66,6 +66,26 @@ function run(cmd, args, { cwd = root, quiet = true, shell = false } = {}) {
 }
 const ff = (args, cwd) => run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { cwd });
 const sha = (s) => createHash('sha256').update(s).digest('hex');
+// Machines with 8 GB or less (soldered laptops are common) get the light path by default:
+// GPU encoder first, and a warning before each render naming what is eating the memory.
+const GB = 1024 ** 3;
+const lowMemoryMachine = () => totalmem() <= 8.5 * GB;
+function memoryCheck() {
+  const free = freemem() / GB;
+  if (free >= 1.5) return { free: Math.round(free * 10) / 10, hogs: [] };
+  let hogs = [];
+  try {
+    if (win) {
+      const out = spawnSync('powershell.exe', ['-NoProfile', '-Command', "Get-Process | Group-Object Name | ForEach-Object { '{0}|{1}' -f $_.Name, [int](($_.Group | Measure-Object WorkingSet64 -Sum).Sum/1MB) } | Sort-Object { [int]($_ -split '[|]')[1] } -Descending | Select-Object -First 5"], { encoding: 'utf8', windowsHide: true, timeout: 15000 }).stdout || '';
+      hogs = out.trim().split(/\r?\n/).filter(Boolean).map((l) => { const [n, mb] = l.split('|'); return `${n} ${mb} MB`; });
+    } else {
+      const out = spawnSync('sh', ['-c', 'ps -eo rss,comm --sort=-rss | head -6 | tail -5'], { encoding: 'utf8', timeout: 15000 }).stdout || '';
+      hogs = out.trim().split(/\n/).filter(Boolean).map((l) => { const [kb, ...c] = l.trim().split(/\s+/); return `${c.join(' ')} ${Math.round(kb / 1024)} MB`; });
+    }
+  } catch {}
+  log(`memory: ${(free * 1024).toFixed(0)} MB free. Taking the light path. Biggest: ${hogs.join(', ') || 'unknown'}. Close what you can for better quality.`);
+  return { free: Math.round(free * 10) / 10, hogs };
+}
 let amfChecked = null;
 const hasAmf = () => (amfChecked ??= /h264_amf/.test(run('ffmpeg', ['-hide_banner', '-encoders'])));
 
@@ -594,14 +614,14 @@ function buildFootage(dir, segments, lay, grade) {
   // x264 at medium is the first choice; on a memory-starved laptop it can refuse to open, so step
   // down rather than fail. The file is checked afterwards: a broken footage file stops the run.
   const ladder = [['-c:v', 'libx264', '-preset', 'medium', '-crf', '17'], ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-threads', '2']];
-  if (hasAmf()) ladder.push(['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '18', '-qp_p', '18']);
+  if (hasAmf()) ladder[lowMemoryMachine() ? 'unshift' : 'push'](['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '18', '-qp_p', '18']);
   let lastError = null;
   for (const enc of ladder) {
     try {
       ff(['-i', 'assets/raw.mp4', '-/filter_complex', script, '-map', '[out]', ...enc, '-r', String(FPS), '-movflags', '+faststart', 'assets/footage.mp4'], dir);
       const size = statSync(join(dir, 'assets/footage.mp4')).size;
       if (size < 10000) throw new Error(`footage came out empty (${size} bytes) with ${enc[1]}`);
-      if (enc !== ladder[0]) log(`footage encoded with ${enc[1]} ${enc[3]} (the usual encoder could not start; the computer is low on memory)`);
+      if (enc !== ladder[0]) log(`footage encoded with ${enc[1]} ${enc[3]} (the first choice could not start; the computer is low on memory)`);
       return;
     } catch (e) { lastError = e; }
   }
@@ -939,6 +959,8 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
     } else { writeFileSync(target, html); hashes[file] = sha(html); writeFileSync(join(dir, 'assets/generated.json'), JSON.stringify(hashes)); }
     if (fmt === formats[0]) writeFileSync(join(dir, 'meta.json'), JSON.stringify({ id: 'reel', name: edit.slug, width: lay.w, height: lay.h, fps: FPS }, null, 2) + '\n');
     if (!doRender) continue;
+    plan.memory = memoryCheck();
+    if (useBrowser && lowMemoryMachine()) log('browser renderer on an 8 GB machine: one worker, minutes per draft, and Chrome must be closed. Use it only for motion-graphics specials.');
     const suffix = fmt === 'horizontal' && formats.length > 1 ? '-horizontal' : '';
     const name = finalName ? `${edit.slug}${suffix}-final.mp4` : `${edit.slug}${suffix}-v${nextVersion(edit.slug, suffix)}.mp4`;
     const out = `renders/${parse(name).name}.mp4`;
@@ -949,7 +971,7 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
     } else {
       const footage = fmt === formats[0] ? 'assets/footage.mp4' : 'assets/footage-horizontal.mp4';
       if (footage !== 'assets/footage.mp4') copyFileSync(join(dir, footage), join(dir, 'assets/footage.mp4'));
-      const r = renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, hasAmf: hasAmf() });
+      const r = renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, hasAmf: hasAmf(), lowMemory: lowMemoryMachine() });
       rendered = r.out;
       renders.push({ engine: `ffmpeg (${r.encoder})`, seconds: r.seconds });
       log(`rendered ${out} in ${r.seconds}s with ${r.encoder}`);
@@ -979,6 +1001,7 @@ function notes(dir, edit, result, suggestions) {
     plan.hook ? `- Hook card for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}" (${plan.hook.pattern || 'custom'}: ${plan.hook.why || 'set by hand'}). Captions keep running under it.` : '- No hook text (per your style).',
     `- Format ${style.format}, color ${style.grade}${result.renders?.[0]?.engine?.startsWith('browser') ? ', slow push-in on every shot' : ''}.`,
     result.renders?.length ? `- Rendered with ${result.renders.map((r) => r.engine + (r.seconds ? ` in ${r.seconds} s` : '')).join(' and ')}.` : null,
+    plan.memory?.hogs?.length ? `- Memory was tight (${plan.memory.free} GB free): ${plan.memory.hogs.slice(0, 3).join(', ')}. Fable used the light encoder path.` : null,
     `- Privacy: ${plan.network?.length ? plan.network.join('; ') + '. Everything else stayed on this computer.' : 'nothing left this computer.'}${style.privacy === 'local' ? ' (local-only mode)' : ''}`,
     plan.handEdited?.length ? `- ${plan.handEdited.join(', ')} was edited by hand and was kept; the freshly generated version sits beside it as *.generated.html. Render the hand-edited one with npx hyperframes render.` : null,
     `- Sound: ${style.sound === 'voice' ? 'voice only' : `${result.mixInfo.cues.length} soft effects`}${result.mixInfo.music ? `, music bed "${result.mixInfo.music}" ducked under the voice` : ''}, mastered to -14 LUFS.`,

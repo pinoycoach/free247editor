@@ -160,6 +160,16 @@ Tell the user to keep that terminal open; closing it stops the watcher. When the
 with notes on a watched draft, continue from "Notes become rules" using the slug in the
 notes file.
 
+## Small computers (8 GB of memory or less)
+
+Fable detects this and takes the light path on its own: the GPU encoder first for footage and
+finals, a memory check before each render that names the apps holding the most memory, and
+drafts in seconds. Tell the user, once, that closing the browser and other apps before a final
+gives the best quality, and that the Chrome renderer (`--engine browser`) runs single-worker on
+this hardware and is for motion-graphics specials only. Keep transcription on Groq when a key
+exists; local Whisper medium would take half the memory. Keep `fable/video-projects` trimmed:
+disk, not memory, is what stops a render first.
+
 ## Never
 
 - Post, upload, or send a video anywhere. Say truthfully what left the computer: the notes

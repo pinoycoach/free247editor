@@ -111,7 +111,9 @@ YouTube and it gets its own framing and text placement.
 - **Optional: an AI coding agent that can run terminal commands** for the refined edits and
   for talking in plain words. Editing uses a lot of usage. Codex blocks internet in its
   sandbox by default, so approve network access when setup or transcription asks.
-- About 1 GB of disk space.
+- About 1 GB of disk space, plus room for your videos. 8 GB of memory is enough: Fable notices a
+  small machine and uses the GPU encoder first, and tells you which apps to close when memory is
+  tight. 16 GB is comfortable.
 
 Tested on Windows 11 with Claude Code (setup, autopilot edit and render, transcription). A 44 s
 vertical draft renders in about 12 s with the AMD encoder on a Ryzen 3 laptop. The

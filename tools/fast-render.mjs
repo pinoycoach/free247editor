@@ -98,7 +98,7 @@ export function buildAss(plan, lay, style) {
 
 // One FFmpeg pass: background (band layouts), footage, B-roll inserts, captions, mix.
 // Returns { out, encoder, seconds }.
-export function renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, hasAmf }) {
+export function renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, hasAmf, lowMemory = false }) {
   mkdirSync(join(dir, 'assets/fonts'), { recursive: true });
   for (const f of readdirSync(fontsDir)) if (f.endsWith('.ttf')) copyFileSync(join(fontsDir, f), join(dir, 'assets/fonts', f));
   writeFileSync(join(dir, 'assets/captions.ass'), buildAss(plan, lay, style));
@@ -122,11 +122,13 @@ export function renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, 
   const draft = quality === 'draft';
   // Encoder ladder: the first that opens wins. x264 at medium wants more RAM than a busy laptop
   // sometimes has, so finals step down to a lighter x264 and then to the GPU encoder.
+  const amfFinal = hasAmf && ['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '20', '-qp_p', '20'];
+  const x264Final = ['-c:v', 'libx264', '-preset', quality === 'high' ? 'slow' : 'medium', '-crf', quality === 'high' ? '17' : '19'];
+  const x264Light = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-threads', '2'];
   const ladder = draft
     ? [hasAmf && ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'cqp', '-qp_i', '24', '-qp_p', '24'], ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24']]
-    : [['-c:v', 'libx264', '-preset', quality === 'high' ? 'slow' : 'medium', '-crf', quality === 'high' ? '17' : '19'],
-      ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-threads', '2'],
-      hasAmf && ['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '20', '-qp_p', '20']];
+    // On an 8 GB machine the GPU encoder goes first: it uses almost no system memory and never refuses to start.
+    : lowMemory ? [amfFinal, x264Light, x264Final] : [x264Final, x264Light, amfFinal];
   const started = Date.now();
   let lastError = null, used = null;
   for (const video of ladder.filter(Boolean)) {

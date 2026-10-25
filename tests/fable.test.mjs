@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { planCuts, timeline, buildCaptions, hookCandidates, chooseHook, hookGate, insideSilence, untranscribed, layoutFor } from '../fable.mjs';
+import { planCuts, timeline, buildCaptions, hookCandidates, chooseHook, hookGate, insideSilence, untranscribed, layoutFor, ruleApplies } from '../fable.mjs';
 import { buildAss, captionLayout } from '../tools/fast-render.mjs';
 
 const W = (text, start, end) => ({ text, start, end });
@@ -104,4 +104,15 @@ test('untranscribed speech is the voiced time with no words in it', () => {
   const m = untranscribed([W('a', 0, 1)], [{ start: 1, end: 2 }, { start: 4, end: 10 }], 10);
   assert.deepEqual(m, [{ start: 2, end: 4 }]);
   assert.equal(insideSilence(0, 1, [{ start: 5, end: 6 }]), null);
+});
+
+test('a scoped rule fires only for the media it names', () => {
+  const reel = { vertical: true, duration: 25 }, tutorial = { vertical: false, duration: 600 };
+  assert.equal(ruleApplies('- [9:16] Hook: always', reel), true);
+  assert.equal(ruleApplies('- [9:16] Hook: always', tutorial), false);
+  assert.equal(ruleApplies('- [16:9] [>90s] Captions: subtitles', tutorial), true);
+  assert.equal(ruleApplies('- [16:9] [>90s] Captions: subtitles', { vertical: false, duration: 30 }), false);
+  assert.equal(ruleApplies('- [<90s] Pace: tight', reel), true);
+  assert.equal(ruleApplies('- Pace: tight', tutorial), true);
+  assert.equal(ruleApplies('- [9:16] Hook: always', null), true);
 });

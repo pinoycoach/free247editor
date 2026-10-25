@@ -1,0 +1,4 @@
+face_detection_yunet_2023mar.onnx: YuNet face detector from the OpenCV Zoo
+(https://github.com/opencv/opencv_zoo), Apache License 2.0. 230 KB, runs on the CPU.
+Fable samples a video at 2 frames per second with it to learn where the face and mouth
+are, so captions and the hook card are placed clear of them. Nothing leaves the computer.

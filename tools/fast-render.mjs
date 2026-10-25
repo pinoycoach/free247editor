@@ -37,6 +37,14 @@ export function captionLayout(lay, style) {
     if (lay.fit === 'band') capY = style.position === 'lower' ? Math.min(F.y + F.h + 120, safeBottom - capFont) : style.position === 'middle' ? Math.max(underHook, F.y - capFont) : underHook;
     else capY = style.position === 'lower' ? safeBottom - capFont : style.position === 'middle' ? H / 2 : underHook;
   } else capY = style.position === 'upper' ? underHook : style.position === 'middle' ? H / 2 : H - 170;
+  // With a measured face, text moves off it: upper text stops above the forehead, lower text starts under the chin.
+  const face = style.face;
+  if (face && lay.fit === 'cover') {
+    const faceTop = face.face_top_p10 * H, chin = face.chin_p90 * H;
+    if (style.position === 'lower' || style.position === 'middle') capY = Math.min(safeBottom - capFont * 0.7, Math.max(capY, chin + 20 + capFont * 0.7));
+    else capY = Math.min(capY, faceTop - 20 - capFont * 0.7);
+    if (capY - capFont * 0.7 < hookBottom + 10) capY = hookBottom + 10 + capFont * 0.7; // never under the card
+  }
   return { capX: W / 2, capY: Math.round(capY), hookX: W / 2, hookY: Math.round(hookY), hookBlock, word, group, sub, hook, safeTop, safeBottom, maxWidth: vertical ? 920 : 1600 };
 }
 

@@ -60,6 +60,9 @@ network access (Codex does by default), ask the user to approve network access f
      print it.
    - On this computer (private, no account). Needs Python: `pip install faster-whisper`.
      Slower without an NVIDIA GPU; the first run downloads the model.
+   If setup says face tracking is missing, offer `pip install opencv-python-headless` (about
+   40 MB, local, CPU). With it, Fable measures where the face is at 2 fps and keeps captions
+   and the hook card off it; without it, the opening sheet is the check.
 3. Open `outbox/setup-test.mp4` for them (`start ""` on Windows, `open` on macOS, `xdg-open`
    on Linux) so they see it works.
 4. Run style setup (below) if `my-style.md` does not exist.
@@ -143,7 +146,8 @@ API). The default is to use none of them.
 - When a note is a lasting preference (it says always or never, it is about style, or the same
   kind of note comes twice), add it to `my-rules.md` as one plain line the autopilot can read
   (for example "Captions: lower third" or "Hook: never") plus the user's exact words and the
-  date. Confirm in one line: "Saved as a rule: ...". Never write rules into `fable/`.
+  date. A rule that only fits one kind of video gets a scope tag at the front: `[9:16]`,
+  `[16:9]`, `[<90s]`, or `[>90s]`, so a Reel note never fires on a long horizontal tutorial. Confirm in one line: "Saved as a rule: ...". Never write rules into `fable/`.
 - When the user approves ("ok na", "approved", "final"), run `node fable.mjs final <slug>`
   (standard quality, `outbox/<slug>-final.mp4`). If you changed `index.html` by hand, add
   `--engine browser` so your graphics are in the final.

@@ -80,6 +80,8 @@ const groq = Boolean(process.env.GROQ_API_KEY);
 const localWhisper = Boolean(run('python', ['-c', 'import faster_whisper'], root, true));
 console.log(`Groq key in .env: ${groq ? 'yes' : 'no'}`);
 console.log(`Local faster-whisper: ${localWhisper ? 'yes' : 'no'}`);
+const opencv = Boolean(run('python', ['-c', 'import cv2'], root, true));
+console.log(`Face tracking (OpenCV): ${opencv ? 'yes' : 'no. Optional, keeps text off the face: pip install opencv-python-headless'}`);
 
 if (existsSync(legacyKit) && !readdirSync(join(legacyKit, 'video-projects'), { withFileTypes: true }).some((d) => d.isDirectory() && existsSync(join(legacyKit, 'video-projects', d.name, 'assets', 'raw.mp4')))) {
   console.log('\nThe old kit/ folder is no longer used. Delete it when you like; everything you made is in fable/video-projects.');

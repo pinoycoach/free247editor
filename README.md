@@ -88,13 +88,14 @@ YouTube and it gets its own framing and text placement.
 | Captions | Word by word, bold key words, key-word pills, or subtitles, in your position and colors, timed to each word |
 | Hook | Up to three openings taken from your own words (claim, question, strongest word), one chosen, all listed in the notes with objective checks and a nine-frame muted-view sheet |
 | B-roll | Optional: free stock clips from Pixabay or Pexels cut in on the key words, every source logged; your own extra clips win |
+| Face | With OpenCV installed, finds the face at 2 fps (230 KB model, CPU) and keeps captions and the hook card off it, measured and reported in the notes |
 | Camera | A slow push-in on every shot; landscape clips get a glowing band layout in vertical |
 | Color | Natural, warm, cool, black and white, or orange and teal |
 | Sound | Soft taps and clicks on real cuts, a music bed from `my-sounds` ducked under your voice, mastered to -14 LUFS |
 | Judgment | Doubtful cuts are left in and listed in the notes for you to decide |
 | Agent extras | Motion cards, B-roll, zoom-ins, payoffs, built on the same timeline (`plan.json`) and rendered through Chrome only when asked |
 | Private | No telemetry, no update checks; the notes say exactly what left the computer (Groq audio, stock key words) or that nothing did; render cache off, temp files cleaned after every job |
-| Learning | Your notes are saved as rules in `my-rules.md` and applied every time |
+| Learning | Your notes are saved as rules in `my-rules.md` and applied every time; a rule can be scoped with `[9:16]`, `[16:9]`, `[<90s]`, or `[>90s]` |
 | 24/7 | `node fable.mjs watch` edits everything that lands in the inbox |
 
 ## What you need

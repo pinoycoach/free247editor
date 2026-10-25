@@ -101,7 +101,20 @@ function cleanup(dir) {
 }
 
 // ---------- style: my-style.md and my-rules.md in plain words ----------
-function readStyle() {
+// A rule line may start with a scope tag so a note from a Reel never fires on a long horizontal
+// tutorial: [9:16] [16:9] [<90s] [>90s]. Untagged lines apply everywhere.
+function ruleApplies(line, media) {
+  if (!media) return true;
+  const tags = [...line.matchAll(/\[(9:16|16:9|<(\d+)s|>(\d+)s)\]/g)];
+  for (const t of tags) {
+    if (t[1] === '9:16' && !media.vertical) return false;
+    if (t[1] === '16:9' && media.vertical) return false;
+    if (t[2] && !(media.duration < Number(t[2]))) return false;
+    if (t[3] && !(media.duration > Number(t[3]))) return false;
+  }
+  return true;
+}
+function readStyle(media = null) {
   const style = {
     format: 'vertical', captions: 'word', position: 'upper', color: '#ffffff', accent: '#facc15',
     hook: true, pace: 'tight', graphics: 'some', grade: 'natural', sound: 'light', font: 'Montserrat', broll: 'none',
@@ -109,7 +122,7 @@ function readStyle() {
   const apply = (text) => {
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.toLowerCase();
-      if (!line.trim() || line.startsWith('#')) continue;
+      if (!line.trim() || line.startsWith('#') || !ruleApplies(raw, media)) continue;
       const never = /\b(never|no|none|wala|huwag|don't|do not)\b/.test(line);
       if (/format|aspect|orientation/.test(line) || /\b(9:16|16:9)\b/.test(line)) {
         if (/both/.test(line)) style.format = 'both';
@@ -522,7 +535,13 @@ function hookGate(plan, style, lay) {
   const capTop = Math.round(L.capY - capFont * 0.7), capBottom = Math.round(L.capY + capFont * 0.7);
   checks.push({ check: `hook card below the top ${safeTop}px (platform UI)`, pass: hookTop === null || hookTop >= safeTop, value: hookTop === null ? 'no hook' : `top at ${hookTop}px` });
   checks.push({ check: `captions inside ${safeTop}..${safeBottom}px and clear of the hook`, pass: capTop >= safeTop && capBottom <= safeBottom && (hookTop === null || capTop >= L.hookY + L.hookBlock / 2), value: `${capTop}..${capBottom}px` });
-  checks.push({ check: 'face band: look at review-open.png', pass: true, value: lay.h > lay.w ? 'text is in the upper third; a face there would show on the sheet' : 'landscape: text in the lower third' });
+  if (plan.face && lay.fit === 'cover') {
+    // Measured: the face box from face.json, in pixels of this layout. Text must not enter it.
+    const faceTop = Math.round(plan.face.face_top_p10 * lay.h), chin = Math.round(plan.face.chin_p90 * lay.h);
+    const textBottom = Math.max(capBottom, hookTop === null ? 0 : Math.round(L.hookY + L.hookBlock / 2));
+    const above = textBottom <= faceTop - 20, below = capTop >= chin + 20 && (hookTop === null || hookTop >= chin + 20);
+    checks.push({ check: 'text clear of the face (measured at 2 fps)', pass: above || below, value: `text ${Math.round(capTop)}..${textBottom}px, face ${faceTop}..${chin}px, seen in ${Math.round((plan.face.coverage || 0) * 100)}% of samples` });
+  } else checks.push({ check: 'face band: look at review-open.png', pass: true, value: plan.face ? 'band layout: footage sits in its own panel' : 'no face data (pip install opencv-python-headless to measure it)' });
   checks.push({ check: 'hook text comes from the speaker', pass: !plan.hook || !plan.hook.source || plan.hook.source.length > 0 || plan.hook.pattern === 'title', value: plan.hook?.pattern || 'none' });
   // The promise on the card must be kept in the cut: every word on the card is spoken in it.
   const said = new Set(plan.words.map((w) => token(w.text)));
@@ -911,15 +930,18 @@ function render(dir, compositionFile, out, quality) {
 
 async function build(dir, edit, { quality = 'draft', render: doRender = true, finalName = false } = {}) {
   const raw = JSON.parse(readFileSync(join(dir, 'assets/raw.json'), 'utf8'));
-  const style = { ...readStyle(), ...(edit.style || {}) };
   const src = edit.source;
+  const style = { ...readStyle({ vertical: src.height > src.width, duration: src.duration }), ...(edit.style || {}) };
   validateEdit(edit);
   const tl = timeline(edit.segments, raw.words || [], edit.fixes || {}, edit.extra || []);
   if (tl.dropped.length) log(`${tl.dropped.length} transcript word${tl.dropped.length > 1 ? 's' : ''} fell inside cuts: ${tl.dropped.map((d) => `"${d.text}"@${d.at}s`).join(', ')}`);
   const { hook, candidates } = chooseHook(edit, tl.words, style);
   const hookEnd = hook ? hook.end : 0;
   // Captions keep running under the hook card; the card sits above the caption zone.
-  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, 0, tl.duration), words: tl.words, dropped: tl.dropped, network: [] };
+  const facePath = join(dir, 'assets/face.json');
+  const face = existsSync(facePath) ? (JSON.parse(readFileSync(facePath, 'utf8')).summary || null) : null;
+  if (face) style.face = face;
+  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, 0, tl.duration), words: tl.words, dropped: tl.dropped, network: [], face };
   if (edit.transcription?.provider === 'groq') plan.network.push('audio was sent to Groq for transcription');
   const formats = style.format === 'both' ? ['vertical', 'horizontal'] : [style.format];
   const useBrowser = (edit.style?.engine || opt.engine) === 'browser' || !hasFastFonts(fontsDir);
@@ -1043,7 +1065,7 @@ async function edit(video) {
   const slug = opt.slug || slugify(basename(source));
   log(`editing ${basename(source)} as ${slug}`);
   const info = probe(source);
-  const style = readStyle();
+  const style = readStyle({ vertical: info.height > info.width, duration: info.duration });
   const lay = layoutFor(style.format === 'both' ? 'vertical' : style.format, info);
   const dir = newProject(slug, lay);
   // One normalized copy to cut from: constant 30 fps, rotation baked in, at most 1920 on the long side.
@@ -1061,6 +1083,11 @@ async function edit(video) {
   // A small proxy for anything that only needs to look: frame checks, contact sheets, agents.
   const pk = 960 / Math.max(norm.width, norm.height);
   ff(['-i', join(dir, 'assets/raw.mp4'), '-vf', `scale=${Math.round(norm.width * pk / 2) * 2}:${Math.round(norm.height * pk / 2) * 2}`, '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-an', '-movflags', '+faststart', join(dir, 'assets/proxy.mp4')]);
+  // Where the face is, at 2 fps, so text stays off it. Optional: needs OpenCV (pip install opencv-python-headless).
+  try {
+    const face = JSON.parse(run('python', [join(root, 'tools/track_face.py'), join(dir, 'assets/proxy.mp4'), join(dir, 'assets/face.json')]));
+    log(`face: found in ${face.detections}/${face.sampled} samples in ${face.seconds}s${face.summary ? `, top at ${Math.round(face.summary.face_top_p10 * 100)}% of the height` : ''}`);
+  } catch (e) { log(`face tracking skipped (${/No module named .cv2./.test(e.message) ? 'pip install opencv-python-headless to enable it' : e.message.split('\n').pop()})`); }
   let transcript = { words: [], audio_duration_secs: norm.duration };
   const names = knownNames();
   let provider = null;
@@ -1186,7 +1213,7 @@ function status() {
   }
 }
 
-export { planCuts, timeline, buildCaptions, hookCandidates, chooseHook, hookGate, insideSilence, untranscribed, layoutFor, readStyle };
+export { planCuts, timeline, buildCaptions, hookCandidates, chooseHook, hookGate, insideSilence, untranscribed, layoutFor, readStyle, ruleApplies };
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {

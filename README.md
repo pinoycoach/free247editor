@@ -26,6 +26,10 @@ node fable.mjs edit inbox/my-video.mp4
 node fable.mjs watch
 ```
 
+```bash
+node fable.mjs clips inbox/podcast.mp4
+```
+
 `watch` keeps running and edits every video that lands in `inbox/`. Each draft comes with
 `outbox/<name>-notes.md` and an editable `edit.json` in its project folder.
 
@@ -96,6 +100,8 @@ YouTube and it gets its own framing and text placement.
 | Agent extras | Motion cards, B-roll, zoom-ins, payoffs, built on the same timeline (`plan.json`) and rendered through Chrome only when asked |
 | Private | No telemetry, no update checks; the notes say exactly what left the computer (Groq audio, stock key words) or that nothing did; render cache off, temp files cleaned after every job |
 | Learning | Your notes are saved as rules in `my-rules.md` and applied every time; a rule can be scoped with `[9:16]`, `[16:9]`, `[<90s]`, or `[>90s]` |
+| Clips | `node fable.mjs clips long.mp4` transcribes a long recording once, chunked at silences, scores the moments that stand alone, and renders the best as separate reels with reasons and runners-up |
+| Word edges | Optional forced alignment (ONNX, CPU, 356 MB model) snaps word boundaries to the sound so soft consonants survive the cut |
 | 24/7 | `node fable.mjs watch` edits everything that lands in the inbox |
 
 ## What you need

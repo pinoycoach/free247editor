@@ -81,6 +81,18 @@ const localWhisper = Boolean(run('python', ['-c', 'import faster_whisper'], root
 console.log(`Groq key in .env: ${groq ? 'yes' : 'no'}`);
 console.log(`Local faster-whisper: ${localWhisper ? 'yes' : 'no'}`);
 const opencv = Boolean(run('python', ['-c', 'import cv2'], root, true));
+const onnx = Boolean(run('python', ['-c', 'import onnxruntime, numpy'], root, true));
+const alignerModel = join(engine, 'models', 'model.q8.onnx');
+if (process.argv.includes('--with-aligner')) {
+  if (!onnx) console.log('Aligner needs: pip install onnxruntime numpy');
+  else if (!existsSync(alignerModel)) {
+    console.log('Downloading the word aligner (356 MB, once)...');
+    const base = 'https://huggingface.co/romara-labs/mms-300m-1130-forced-aligner-ONNX/resolve/main/';
+    const ok = run('curl', ['-sSL', '-o', alignerModel, base + 'model.q8.onnx'], root) && run('curl', ['-sSL', '-o', join(engine, 'models', 'aligner-vocab.json'), base + 'vocab.json'], root);
+    if (!ok) console.log('Download failed; try again later.');
+  }
+}
+console.log(`Word alignment (ONNX): ${onnx && existsSync(alignerModel) ? 'yes' : onnx ? 'model not downloaded. Optional, cleaner cut edges on soft speech: node setup.mjs --with-aligner (356 MB)' : 'no. Optional: pip install onnxruntime numpy, then node setup.mjs --with-aligner'}`);
 console.log(`Face tracking (OpenCV): ${opencv ? 'yes' : 'no. Optional, keeps text off the face: pip install opencv-python-headless'}`);
 
 if (existsSync(legacyKit) && !readdirSync(join(legacyKit, 'video-projects'), { withFileTypes: true }).some((d) => d.isDirectory() && existsSync(join(legacyKit, 'video-projects', d.name, 'assets', 'raw.mp4')))) {

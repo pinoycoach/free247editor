@@ -14,7 +14,7 @@ editing or coding terms. Run every command from the repo root unless a step says
 | Path | What it is |
 | --- | --- |
 | `setup.mjs` | One-time setup. Safe to re-run. |
-| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `watch`, `status`. |
+| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `clips`, `watch`, `status`. |
 | `tools/transcribe.mjs` | Free word-level transcription (Groq, or `--local` faster-whisper). |
 | `inbox/` | Raw videos the user wants edited. |
 | `outbox/` | Every draft and final, named `<slug>-v1.mp4`, `<slug>-final.mp4`, plus `<slug>-notes.md`. |
@@ -154,6 +154,26 @@ API). The default is to use none of them.
 - "Horizontal version" or "for YouTube": set `"style": {"format": "horizontal"}` in `edit.json`
   and rebuild; Fable composes 1920x1080 with its own framing and text placement, not a crop.
   Then refine as in step 4 if needed.
+
+## Long recordings: "find the best moments", "make clips", a podcast or webinar
+
+Run `node fable.mjs clips "<path>"` (defaults: 5 clips of 25 to 60 s; `--count`, `--min`,
+`--max` change that). Fable transcribes the whole recording once (chunked at silences when it
+is over ten minutes, so no word is split), scores every window that starts after a real pause
+and ends on a finished sentence (opening hook, finished ending, pace, no retakes), cuts each
+pick straight out of the original, and runs the normal reel pipeline on each:
+`outbox/<name>-clip1-v1.mp4`, `-clip2`, and so on, plus `outbox/<name>-clips.md` with why each
+was picked and the runners-up. Each clip is its own project (`<name>-clip1`) with its own
+`edit.json`, so notes work the same way. The picks are structural; your judgment on which is
+the funniest or truest still wins, and a note like "use the runner-up at 12:40" is one rebuild.
+
+## Word alignment (optional)
+
+With `pip install onnxruntime numpy` and `node setup.mjs --with-aligner` (a 356 MB model,
+once), Fable snaps each word's edges to the sound after transcription. Default mode widens
+words only, so cuts get room and soft consonants are not clipped; "Alignment: tight" in the
+rules uses the aligned times as they are; "Alignment: off" skips it. The notes say how many
+words moved. On an 8 GB machine it takes about 17 s for a 45 s clip and 460 MB of memory.
 
 ## 24/7: "watch the inbox", "edit everything I drop", "run on your own"
 

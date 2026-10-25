@@ -43,29 +43,56 @@ if (local) {
     console.error('GROQ_API_KEY is not set. Get a free key at https://console.groq.com/keys and put it in .env, or use --local.');
     process.exit(2);
   }
-  // ponytail: one upload, Groq's free tier caps files at 25 MB (about 50 min of 64 kbps mono).
-  // Split the audio and offset each chunk's times if longer recordings ever matter.
-  const audio = join(dir, `${name}.transcribe.mp3`);
-  run('ffmpeg', ['-y', '-loglevel', 'error', '-i', video, '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k', audio]);
-  const form = new FormData();
-  form.append('file', new Blob([readFileSync(audio)]), 'audio.mp3');
-  form.append('model', 'whisper-large-v3');
-  form.append('response_format', 'verbose_json');
-  form.append('timestamp_granularities[]', 'word');
-  // Names and brand words steer the decoder (Whisper's prompt). Free, and it fixes "Stevie" for "Phi Phi".
-  if (prompt) form.append('prompt', prompt.slice(0, 800));
-  const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-    body: form,
-  });
-  rmSync(audio, { force: true });
-  if (!res.ok) {
-    console.error(`Groq transcription failed: HTTP ${res.status} ${(await res.text()).slice(0, 300)}`);
-    process.exit(3);
+  // Groq's free tier caps a file at 25 MB, about 50 minutes of 64 kbps mono. Longer recordings are
+  // split into chunks of about 10 minutes, cut at the widest silence near each boundary so no
+  // word is split, and the last words of each chunk prime the next one so names stay consistent.
+  const CHUNK = Number(process.env.FABLE_CHUNK_SECONDS) || 600, SEARCH = Math.min(90, CHUNK / 4);
+  const seams = [0];
+  if (duration > CHUNK + 60) {
+    const sd = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-i', video, '-vn', '-af', 'silencedetect=noise=-30dB:d=0.3', '-f', 'null', '-'], { encoding: 'utf8', maxBuffer: 1 << 26, windowsHide: true }).stderr || '';
+    const silences = [];
+    let open = null;
+    for (const m of sd.matchAll(/silence_(start|end): ([\d.]+)/g)) { if (m[1] === 'start') open = Number(m[2]); else if (open !== null) { silences.push({ start: open, end: Number(m[2]) }); open = null; } }
+    let cursor = 0;
+    while (duration - cursor > CHUNK + 60) {
+      const want = cursor + CHUNK;
+      const near = silences.filter((s) => s.start >= want - SEARCH && s.end <= want + 30);
+      const best = near.sort((a, b) => (b.end - b.start) - (a.end - a.start))[0];
+      cursor = best ? (best.start + best.end) / 2 : want;
+      seams.push(cursor);
+    }
   }
-  const body = await res.json();
-  words = (body.words || []).map((w) => ({ text: w.word.trim(), start: w.start, end: w.end }));
+  seams.push(duration);
+  words = [];
+  let tail = '';
+  for (let i = 0; i + 1 < seams.length; i++) {
+    const [a, b] = [seams[i], seams[i + 1]];
+    const audio = join(dir, `${name}.transcribe.mp3`);
+    run('ffmpeg', ['-y', '-loglevel', 'error', '-ss', String(a), '-to', String(b), '-i', video, '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k', audio]);
+    const form = new FormData();
+    form.append('file', new Blob([readFileSync(audio)]), 'audio.mp3');
+    form.append('model', 'whisper-large-v3');
+    form.append('response_format', 'verbose_json');
+    form.append('timestamp_granularities[]', 'word');
+    // Names and brand words steer the decoder (Whisper's prompt), plus the previous chunk's tail.
+    const p = [prompt, tail].filter(Boolean).join(' ').slice(-800);
+    if (p) form.append('prompt', p);
+    const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
+      body: form,
+    });
+    rmSync(audio, { force: true });
+    if (!res.ok) {
+      console.error(`Groq transcription failed (chunk ${i + 1}/${seams.length - 1}): HTTP ${res.status} ${(await res.text()).slice(0, 300)}`);
+      process.exit(3);
+    }
+    const body = await res.json();
+    const chunkWords = (body.words || []).map((w) => ({ text: w.word.trim(), start: Number((w.start + a).toFixed(3)), end: Number((w.end + a).toFixed(3)) }));
+    words.push(...chunkWords);
+    tail = chunkWords.slice(-20).map((w) => w.text).join(' ');
+    if (seams.length > 2) console.error(`chunk ${i + 1}/${seams.length - 1}: ${chunkWords.length} words`);
+  }
 }
 
 words = words.filter((w) => w.text && w.end >= w.start);

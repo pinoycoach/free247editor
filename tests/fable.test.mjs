@@ -116,3 +116,25 @@ test('a scoped rule fires only for the media it names', () => {
   assert.equal(ruleApplies('- Pace: tight', tutorial), true);
   assert.equal(ruleApplies('- [9:16] Hook: always', null), true);
 });
+
+test('clips: a self-contained moment with a hook and a finished ending outranks a run-on', async () => {
+  const { scoreClips, phrasesOf } = await import('../tools/clips.mjs');
+  // 70 s of speech: a hooky 30 s block, a pause, then filler with no sentence ends.
+  const words = [];
+  let t = 0;
+  const say = (text, gapAfter = 0.12) => { for (const w of text.split(' ')) { words.push(W(w, +t.toFixed(2), +(t + 0.25).toFixed(2))); t += 0.37; } t += gapAfter; };
+  say('Here is why most people fail at this.', 0.7);
+  say('They start with the tool and not the problem.', 0.5);
+  say('I made that mistake for two years.', 0.5);
+  say('So if you take one thing from this, start with the problem.', 1.2);
+  for (let k = 0; k < 14; k++) say('and then we kind of went on and on about it', 0.2);
+  say('okay', 2);
+  const ph = phrasesOf(words);
+  assert.ok(ph.length >= 5);
+  const r = scoreClips(words, { min: 10, max: 40, count: 2 });
+  assert.ok(r.top.length >= 1, 'found a clip');
+  const best = r.top[0];
+  assert.ok(best.start < 0.1, 'the hooky block is the pick');
+  assert.ok(/hook/.test(best.why) && /finished line/.test(best.why));
+  assert.ok(r.top.every((c) => c.duration >= 10 && c.duration <= 40));
+});

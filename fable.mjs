@@ -5,6 +5,7 @@
 //   node fable.mjs rebuild <slug> [--quality ...]   after editing fable/video-projects/<slug>/edit.json
 //   node fable.mjs final <slug>                      standard-quality render to outbox/<slug>-final.mp4
 //   node fable.mjs watch [--every 5] [--once]        24/7: edit every new video that lands in inbox/
+//   node fable.mjs clips <long video> [--count 5] [--min 25] [--max 60]   best moments as separate reels
 //   node fable.mjs status
 //   --engine fast|browser   fast (default): FFmpeg + libass, seconds. browser: HyperFrames + Chrome, minutes.
 //
@@ -19,6 +20,7 @@ import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { captionLayout, hasFastFonts, renderFast, reviewSheets } from './tools/fast-render.mjs';
+import { scoreClips } from './tools/clips.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -40,6 +42,7 @@ const { values: opt, positionals } = parseArgs({
     slug: { type: 'string' }, format: { type: 'string' }, quality: { type: 'string', default: 'draft' },
     every: { type: 'string', default: '5' }, once: { type: 'boolean' }, 'no-render': { type: 'boolean' },
     engine: { type: 'string', default: 'fast' },
+    count: { type: 'string', default: '5' }, min: { type: 'string', default: '25' }, max: { type: 'string', default: '60' },
   },
 });
 const [command, target] = positionals;
@@ -165,6 +168,7 @@ function readStyle(media = null) {
         else if (/music/.test(line) && !never) style.sound = 'music';
         else if (/light|some|sound effects|sfx/.test(line)) style.sound = 'light';
       }
+      if (/align(ment)?:/.test(line)) style.alignment = never || /\boff\b/.test(line) ? 'off' : /replace|tight/.test(line) ? 'replace' : 'widen';
       if (/retakes?:/.test(line)) style.retakes = /\bcut\b|remove|auto/.test(line) && !never ? 'cut' : 'suggest';
       if (/stutters?:/.test(line)) style.stutters = /suggest|ask|keep/.test(line) || never ? 'suggest' : 'cut';
       if (/privacy|stealth|offline|local only/.test(line)) style.privacy = /local|offline|stealth|only/.test(line) && !/\bno\b|off/.test(line) ? 'local' : 'normal';
@@ -312,6 +316,20 @@ function knownNames() {
   const names = new Set();
   for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) if (/^\s*-?\s*names?:/i.test(line)) for (const m of line.matchAll(/"([^"]+)"/g)) names.add(m[1]);
   return [...names];
+}
+
+// Forced alignment (optional): a small CTC model on the CPU snaps word edges to the sound.
+// Default mode widens words only, so cuts get room and captions never start late.
+const alignerReady = () => existsSync(join(engine, 'models/model.q8.onnx')) && existsSync(join(engine, 'models/aligner-vocab.json'));
+function alignWords(dir, style) {
+  if (style.alignment === 'off' || !alignerReady()) return null;
+  const rawPath = join(dir, 'assets/raw.json');
+  try {
+    const out = run('python', [join(root, 'tools/align_words.py'), join(dir, 'assets/raw.mp4'), rawPath, rawPath, '--mode', style.alignment === 'replace' ? 'replace' : 'widen']);
+    const info = JSON.parse(out.trim().split('\n').pop());
+    log(`aligned ${info.words_moved}/${info.of} words to the audio (median ${info.median_shift_ms} ms, ${info.mode}) in ${info.seconds}s`);
+    return info;
+  } catch (e) { log(`alignment skipped: ${e.message.split('\n').pop()}`); return null; }
 }
 
 function planCuts(words, duration, style, silences = null, names = []) {
@@ -1019,6 +1037,7 @@ function notes(dir, edit, result, suggestions) {
     '## What Fable did', '',
     `- Cut ${src.duration.toFixed(1)} s down to ${plan.duration.toFixed(1)} s (removed ${removed.toFixed(1)} s${(edit.removed || edit.deletes || []).some((d) => /stutter/.test(d.reason)) ? ' of dead air and stutters' : ' of dead air'}${(edit.removed || edit.deletes || []).some((d) => /retake/.test(d.reason)) ? ', plus retakes' : ''}) in ${plan.segments.length} pieces, cutting only where the audio is quiet.`,
     `- Captions: ${style.captions}${style.captions !== 'none' ? `, ${style.position} third, ${style.color}${style.captions !== 'subtitles' ? ` with ${style.accent} accents` : ''}` : ''}. ${plan.words.length} of ${edit.transcription?.words ?? plan.words.length} transcript words kept${edit.transcription?.voicedSeconds ? `; ${(edit.transcription.words / edit.transcription.voicedSeconds).toFixed(1)} words per voiced second` : ''}${plan.dropped?.length ? `; ${plan.dropped.length} fell inside cuts` : ''}.`,
+    edit.transcription?.aligned ? `- Word edges aligned to the audio (${edit.transcription.aligned.moved} words, median ${edit.transcription.aligned.medianMs} ms, ${edit.transcription.aligned.mode}).` : null,
     edit.transcription?.missed?.length ? `- LOW COVERAGE: voice with no transcript words at ${edit.transcription.missed.map((m) => `${fmt(m.start)}-${fmt(m.end)}`).join(', ')} (source time). Kept uncut. Listen there and add words with "extra" if needed.` : null,
     plan.hook ? `- Hook card for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}" (${plan.hook.pattern || 'custom'}: ${plan.hook.why || 'set by hand'}). Captions keep running under it.` : '- No hook text (per your style).',
     `- Format ${style.format}, color ${style.grade}${result.renders?.[0]?.engine?.startsWith('browser') ? ', slow push-in on every shot' : ''}.`,
@@ -1059,12 +1078,14 @@ function notes(dir, edit, result, suggestions) {
 }
 const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${(s % 60).toFixed(2).padStart(5, '0')}`;
 
-async function edit(video) {
+async function edit(video, extra = {}) {
   const source = resolve(video);
   if (!existsSync(source)) die(`not found: ${source}`);
-  const slug = opt.slug || slugify(basename(source));
-  log(`editing ${basename(source)} as ${slug}`);
+  const slug = extra.slug || opt.slug || slugify(basename(source));
+  const window = extra.window || null;   // clips mode: { start, end } in source seconds
+  log(`editing ${basename(source)}${window ? ` ${fmt(window.start)}-${fmt(window.end)}` : ''} as ${slug}`);
   const info = probe(source);
+  if (window) info.duration = window.end - window.start;
   const style = readStyle({ vertical: info.height > info.width, duration: info.duration });
   const lay = layoutFor(style.format === 'both' ? 'vertical' : style.format, info);
   const dir = newProject(slug, lay);
@@ -1073,10 +1094,11 @@ async function edit(video) {
   const tw = Math.round(info.width * k / 2) * 2, th = Math.round(info.height * k / 2) * 2;
   const audioArgs = info.hasAudio ? ['-map', '0:a:0', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'] : ['-an'];
   log(`normalizing to ${tw}x${th} @ ${FPS} fps`);
-  ff(['-i', source, '-map', '0:v:0', ...audioArgs, '-vf', `scale=${tw}:${th}:flags=lanczos`, '-r', String(FPS), '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', join(dir, 'assets/raw.mp4')]);
+  const cutIn = window ? ['-ss', String(window.start), '-to', String(window.end)] : [];
+  ff([...cutIn, '-i', source, '-map', '0:v:0', ...audioArgs, '-vf', `scale=${tw}:${th}:flags=lanczos`, '-r', String(FPS), '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', join(dir, 'assets/raw.mp4')]);
   const norm = probe(join(dir, 'assets/raw.mp4'));
   // A file that is still copying, or stopped copying, has a full header and a short body.
-  if (info.duration - norm.duration > 1.0) {
+  if (!window && info.duration - norm.duration > 1.0) {
     rmSync(dir, { recursive: true, force: true });
     die(`${basename(source)} is incomplete: its header says ${info.duration.toFixed(1)} s but only ${norm.duration.toFixed(1)} s can be read. The copy into inbox/ was cut short. Copy the file again (wait for the transfer to finish) and try once more.`);
   }
@@ -1091,12 +1113,20 @@ async function edit(video) {
   let transcript = { words: [], audio_duration_secs: norm.duration };
   const names = knownNames();
   let provider = null;
-  if (info.hasAudio) { log(`transcribing (${style.privacy === 'local' ? 'local only' : 'free'})`); ({ transcript, provider } = transcribe(dir, style, names)); }
+  if (extra.words) {
+    // Clips mode: the long recording was transcribed once; shift its words into this window.
+    transcript = { text: '', audio_duration_secs: norm.duration, words: extra.words.filter((w) => w.start >= window.start - 0.05 && w.end <= window.end + 0.05).map((w) => ({ text: w.text, start: r3(Math.max(0, w.start - window.start)), end: r3(Math.min(norm.duration, w.end - window.start)) })) };
+    provider = extra.provider || null;
+    writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify(transcript, null, 2));
+  } else if (info.hasAudio) { log(`transcribing (${style.privacy === 'local' ? 'local only' : 'free'})`); ({ transcript, provider } = transcribe(dir, style, names)); }
   else writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify(transcript));
   if (!existsSync(join(dir, 'assets/raw.json'))) writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify(transcript));
-  const words = (transcript.words || []).filter((w) => w.text && w.end >= w.start);
+  let words = (transcript.words || []).filter((w) => w.text && w.end >= w.start);
   const renamed = applyNames(words, names);
-  if (renamed) { log(`${renamed} word${renamed > 1 ? 's' : ''} snapped to a known name`); writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify({ ...transcript, words }, null, 2)); }
+  if (renamed) log(`${renamed} word${renamed > 1 ? 's' : ''} snapped to a known name`);
+  writeFileSync(join(dir, 'assets/raw.json'), JSON.stringify({ ...transcript, words }, null, 2));
+  const aligned = words.length && info.hasAudio ? alignWords(dir, style) : null;
+  if (aligned) words = JSON.parse(readFileSync(join(dir, 'assets/raw.json'), 'utf8')).words;
   // Cuts need two opinions: the transcript (where words are) and the audio (where it is really quiet).
   const { silences, noise } = info.hasAudio ? detectSilenceAdaptive(join(dir, 'assets/raw.mp4'), words, style.pace === 'tight' ? 0.42 : 0.8) : { silences: [{ start: 0, end: norm.duration }], noise: null };
   if (noise !== null) log(`silence floor ${noise} dB: ${silences.length} quiet stretches`);
@@ -1106,7 +1136,7 @@ async function edit(video) {
   const editDoc = {
     version: 1, slug, created: new Date().toISOString(),
     source: { file: source, duration: norm.duration, width: norm.width, height: norm.height, hasAudio: info.hasAudio },
-    transcription: { provider, words: words.length, voicedSeconds: r3(norm.duration - silences.reduce((a, s) => a + (Math.min(s.end, norm.duration) - s.start), 0)), missed },
+    transcription: { provider, aligned: aligned ? { mode: aligned.mode, moved: aligned.words_moved, medianMs: aligned.median_shift_ms } : null, words: words.length, voicedSeconds: r3(norm.duration - silences.reduce((a, s) => a + (Math.min(s.end, norm.duration) - s.start), 0)), missed },
     style: {}, segments: cuts.keeps.map((k) => ({ src0: r3(k.src0), src1: r3(k.src1) })),
     removed: cuts.deletes.map((d) => ({ start: r3(d.start), end: r3(d.end), reason: d.reason })),
     suggestions: cuts.suggestions.map((s) => ({ ...s, start: r3(s.start), end: r3(s.end) })),
@@ -1158,6 +1188,54 @@ async function rebuild(slug, finalRender = false) {
   writeFileSync(join(dir, 'edit.json'), JSON.stringify(doc, null, 2));
   notes(dir, doc, result, doc.suggestions || []);
   for (const o of result.outputs) log(`${finalRender ? 'final' : 'draft'}: ${o}`);
+}
+
+// ---------- clips: the best moments of a long recording, each as its own reel ----------
+async function clips(video) {
+  const source = resolve(video);
+  if (!existsSync(source)) die(`not found: ${source}`);
+  const base = opt.slug || slugify(basename(source)).replace(/-\d{4}-\d{2}-\d{2}$/, '');
+  const dir = join(projects, `${base}-clips`);
+  mkdirSync(join(dir, 'assets'), { recursive: true });
+  const info = probe(source);
+  const style = readStyle({ vertical: info.height > info.width, duration: info.duration });
+  const names = knownNames();
+  log(`clips: ${basename(source)}, ${(info.duration / 60).toFixed(1)} min`);
+  // One cheap audio file for the whole recording; transcribe.mjs chunks it when it is long.
+  const audio = join(dir, 'assets/audio.mp3');
+  if (!existsSync(audio)) ff(['-i', source, '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k', audio]);
+  const wordsPath = join(dir, 'assets/audio.json');
+  let provider = null;
+  if (!existsSync(wordsPath)) {
+    log(`transcribing the whole recording (${style.privacy === 'local' ? 'local only' : 'free'})`);
+    try { process.loadEnvFile(join(root, '.env')); } catch {}
+    const local = !(process.env.GROQ_API_KEY && style.privacy !== 'local');
+    run('node', [join(root, 'tools/transcribe.mjs'), audio, ...(local ? ['--local'] : []), ...(names.length ? ['--prompt', names.join(', ')] : [])]);
+    provider = local ? 'local' : 'groq';
+  }
+  const words = JSON.parse(readFileSync(wordsPath, 'utf8')).words.filter((w) => w.text && w.end >= w.start);
+  applyNames(words, names);
+  const { silences } = detectSilenceAdaptive(audio, words, 0.42);
+  const cuts = planCuts(words, info.duration, style, silences, names);
+  const dirty = [...cuts.suggestions.filter((s) => s.kind === 'possible retake').map((s) => ({ start: s.start, end: s.end })), ...untranscribed(words, silences, info.duration)];
+  const ranked = scoreClips(words, { silences, dirty, min: Number(opt.min), max: Number(opt.max), count: Number(opt.count) });
+  writeFileSync(join(dir, 'clips.json'), JSON.stringify({ source, duration: info.duration, words: words.length, ...ranked }, null, 2));
+  if (!ranked.top?.length) die(`no self-contained ${opt.min}-${opt.max} s moments found (${ranked.considered || 0} windows looked at). Try --min 15 or check the transcript in ${wordsPath}.`);
+  log(`${ranked.top.length} clips picked from ${ranked.considered} windows`);
+  const made = [];
+  for (const [i, c] of ranked.top.entries()) {
+    const pad = 0.3;
+    const r = await edit(source, { slug: `${base}-clip${i + 1}`, window: { start: Math.max(0, c.start - pad), end: Math.min(info.duration, c.end + pad) }, words, provider });
+    made.push({ ...c, slug: r.slug, outputs: r.outputs });
+  }
+  const lines = [`# ${base}: clips`, '', `Source: ${source} (${(info.duration / 60).toFixed(1)} min, ${words.length} words). ${ranked.considered} windows scored; ${ranked.top.length} picked.`, '',
+    '## Picked', '', ...made.map((m, i) => `${i + 1}. ${fmt(m.start)}-${fmt(m.end)} (${m.duration}s, score ${m.score}): "${m.opening}..." to "...${m.closing}". ${m.why}. Draft: ${m.outputs.map((o) => basename(o)).join(', ')}`), '',
+    '## Runners-up', '', ...(ranked.runnersUp || []).map((m) => `- ${fmt(m.start)}-${fmt(m.end)} (${m.duration}s, score ${m.score}): "${m.opening}..." ${m.why}.`), '',
+    'To make a runner-up: node fable.mjs edit "<source>" --slug <name> with "segments" set to that window, or ask your agent.', ''];
+  const notesPath = join(outbox, `${base}-clips.md`);
+  writeFileSync(notesPath, lines.join('\n'));
+  log(`clips notes: ${notesPath}`);
+  return made;
 }
 
 // ---------- watch: the 24/7 part ----------
@@ -1213,7 +1291,7 @@ function status() {
   }
 }
 
-export { planCuts, timeline, buildCaptions, hookCandidates, chooseHook, hookGate, insideSilence, untranscribed, layoutFor, readStyle, ruleApplies };
+export { planCuts, timeline, buildCaptions, hookCandidates, chooseHook, hookGate, insideSilence, untranscribed, layoutFor, readStyle, ruleApplies, alignerReady };
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
@@ -1221,6 +1299,7 @@ if (isMain) {
     case 'edit': if (!target) die('usage: node fable.mjs edit <video>'); await edit(target); break;
     case 'rebuild': if (!target) die('usage: node fable.mjs rebuild <slug>'); await rebuild(target); break;
     case 'final': if (!target) die('usage: node fable.mjs final <slug>'); await rebuild(target, true); break;
+    case 'clips': if (!target) die('usage: node fable.mjs clips <video>'); await clips(target); break;
     case 'watch': watch(); break;
     case 'status': status(); break;
     default:

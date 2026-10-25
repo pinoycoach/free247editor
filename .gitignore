@@ -30,3 +30,7 @@ __pycache__/
 
 # Research scratch (reports/ is kept)
 research_notes/
+
+# Downloaded on first use (340 MB aligner); the 230 KB face model is committed
+fable/models/model.q8.onnx
+fable/models/aligner-vocab.json

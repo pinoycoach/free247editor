@@ -8,5 +8,8 @@
     "edit": "node fable.mjs edit",
     "watch": "node fable.mjs watch"
   },
-  "engines": { "node": ">=22" }
+  "engines": {
+    "node": ">=22"
+  },
+  "version": "3.0.0"
 }

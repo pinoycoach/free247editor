@@ -165,6 +165,7 @@ function readStyle(media = null) {
         else if (/music/.test(line) && !never) style.sound = 'music';
         else if (/light|some|sound effects|sfx/.test(line)) style.sound = 'light';
       }
+      if (/\bvoice:/.test(line)) style.voice = /natural|raw|untouched|as recorded/.test(line) ? 'natural' : 'level';
       if (/retakes?:/.test(line)) style.retakes = /\bcut\b|remove|auto/.test(line) && !never ? 'cut' : 'suggest';
       if (/stutters?:/.test(line)) style.stutters = /suggest|ask|keep/.test(line) || never ? 'suggest' : 'cut';
       if (/privacy|stealth|offline|local only/.test(line)) style.privacy = /local|offline|stealth|only/.test(line) && !/\bno\b|off/.test(line) ? 'local' : 'normal';
@@ -497,8 +498,9 @@ function hookCandidates(words, slug) {
     out.push({ pattern, text: ws.join(' '), lines: toLines(ws), source: span.map((w) => w.i), from: r3(span[0].start), payoff: r3(payoff.end), why });
   };
   if (!early.length) {
-    const ws = slug.replace(/-\d{4}-\d{2}-\d{2}.*$/, '').split('-').filter(Boolean);
-    return ws.length ? [{ pattern: 'title', text: ws.join(' '), lines: toLines(ws), source: [], from: 0, payoff: 0, why: 'no speech found, so the file name is the title' }] : [];
+    // No speech (a pet clip, b-roll): a real title from the file name is fine, a camera name is not.
+    const ws = slug.replace(/-\d{4}-\d{2}-\d{2}.*$/, '').split('-').filter((w) => /[a-z]{3,}/i.test(w) && !/^(vid|img|mov|dsc|pxl|screen|recording|clip|video|final|copy)$/i.test(w));
+    return ws.length >= 2 ? [{ pattern: 'title', text: ws.join(' '), lines: toLines(ws), source: [], from: 0, payoff: 0, why: 'no speech found, so the file name is the title' }] : [];
   }
   // 1. Claim: the first sentence, the speaker's own opening line.
   const first = [];
@@ -646,11 +648,15 @@ function buildFootage(dir, segments, lay, grade) {
   }
   throw new Error(`could not encode the cut footage. ${lastError?.message.split('\n')[0]}. Free some memory (close browser tabs or other apps) and run again.`);
 }
-function buildVoice(dir, segments, hasAudio, duration) {
+// Soft phrases come up, loud ones stay put: a high-pass for rumble, gentle compression, then a
+// speech normalizer that lifts quiet passages without pumping. "Voice: natural" in the rules skips it.
+const VOICE_LEVEL = 'highpass=f=80,acompressor=threshold=-22dB:ratio=2.5:attack=8:release=140:makeup=2,speechnorm=e=4:r=0.0005:l=1,alimiter=limit=0.95:level=0';
+function buildVoice(dir, segments, hasAudio, duration, style = {}) {
   if (!hasAudio) { ff(['-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${duration}`, 'assets/voice.wav'], dir); return; }
   const a = segments.map((s, i) => { const d = secs(s.frames); return `[0:a]atrim=start=${s.src0}:end=${r3(s.src0 + d)},asetpts=PTS-STARTPTS,afade=t=in:d=0.012,afade=t=out:st=${r3(Math.max(0, d - 0.015))}:d=0.015[a${i}]`; });
   const script = join(dir, 'assets/voice.filter');
-  writeFileSync(script, a.join(';\n') + ';\n' + segments.map((_, i) => `[a${i}]`).join('') + `concat=n=${segments.length}:v=0:a=1,aresample=48000[voice]`);
+  const level = style.voice === 'natural' ? '' : `,${VOICE_LEVEL}`;
+  writeFileSync(script, a.join(';\n') + ';\n' + segments.map((_, i) => `[a${i}]`).join('') + `concat=n=${segments.length}:v=0:a=1${level},aresample=48000[voice]`);
   ff(['-i', 'assets/raw.mp4', '-/filter_complex', script, '-map', '[voice]', '-ac', '2', '-ar', '48000', 'assets/voice.wav'], dir);
 }
 const SFX = {
@@ -948,7 +954,7 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   log(`cut: ${src.duration.toFixed(1)}s -> ${tl.duration.toFixed(1)}s in ${tl.segments.length} pieces, ${tl.words.length} words, captions: ${style.captions}`);
   const broll = Array.isArray(edit.broll) ? edit.broll : style.privacy === 'local' ? [] : await fetchBroll(dir, tl, style, hookEnd);
   if (broll.length && !Array.isArray(edit.broll)) plan.network.push(`spoken key words were sent to ${broll[0].provider} to find stock clips`);
-  buildVoice(dir, tl.segments, src.hasAudio, tl.duration);
+  buildVoice(dir, tl.segments, src.hasAudio, tl.duration, style);
   const mixInfo = buildMix(dir, plan, style, tl.duration);
   plan.gate = hookGate(plan, style, layoutFor(formats[0], src));
   plan.mix = mixInfo;

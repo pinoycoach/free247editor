@@ -31,12 +31,18 @@ const run = (cmd, cmdArgs) => {
 };
 
 const { dir, name } = parse(resolve(video));
+// Soft speech is the usual reason words go missing. Level the audio before the model hears it.
+const LEVEL = 'highpass=f=80,acompressor=threshold=-22dB:ratio=2.5:attack=8:release=140:makeup=2,speechnorm=e=4:r=0.0005:l=1,alimiter=limit=0.95:level=0';
 const out = join(dir, `${name}.json`);
 const duration = Number(run('ffprobe', ['-v', 'error', '-show_entries', 'format=duration', '-of', 'csv=p=0', video]));
 
 let words;
 if (local) {
-  const json = run('python', [join(root, 'tools', 'transcribe_local.py'), resolve(video), model, prompt]);
+  // The speech model hears a leveled copy: rumble removed, soft phrases lifted. Same chain as the edit's voice.
+  const leveled = join(dir, `${name}.transcribe.wav`);
+  run('ffmpeg', ['-y', '-loglevel', 'error', '-i', video, '-vn', '-ac', '1', '-ar', '16000', '-af', LEVEL, leveled]);
+  let json;
+  try { json = run('python', [join(root, 'tools', 'transcribe_local.py'), leveled, model, prompt]); } finally { rmSync(leveled, { force: true }); }
   words = JSON.parse(json);
 } else {
   if (!process.env.GROQ_API_KEY) {
@@ -46,7 +52,7 @@ if (local) {
   // ponytail: one upload, Groq's free tier caps files at 25 MB (about 50 min of 64 kbps mono).
   // Split the audio and offset each chunk's times if longer recordings ever matter.
   const audio = join(dir, `${name}.transcribe.mp3`);
-  run('ffmpeg', ['-y', '-loglevel', 'error', '-i', video, '-vn', '-ac', '1', '-ar', '16000', '-b:a', '64k', audio]);
+  run('ffmpeg', ['-y', '-loglevel', 'error', '-i', video, '-vn', '-ac', '1', '-ar', '16000', '-af', LEVEL, '-b:a', '64k', audio]);
   const form = new FormData();
   form.append('file', new Blob([readFileSync(audio)]), 'audio.mp3');
   form.append('model', 'whisper-large-v3');

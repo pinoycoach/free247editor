@@ -1,4 +1,4 @@
-# Fable
+# Fable v3
 
 ![License](https://img.shields.io/github/license/pinoycoach/free247editor?style=flat-square&color=green) ![Agent Skills](https://img.shields.io/badge/Agent-Skills-8A2BE2?style=flat-square) ![Claude Code](https://img.shields.io/badge/Claude%20Code-ready-D97757?style=flat-square&logo=anthropic&logoColor=white) ![Price](https://img.shields.io/badge/price-free-brightgreen?style=flat-square)
 
@@ -91,6 +91,7 @@ YouTube and it gets its own framing and text placement.
 | Face | With OpenCV installed, finds the face at 2 fps (230 KB model, CPU) and keeps captions and the hook card off it, measured and reported in the notes |
 | Camera | A slow push-in on every shot; landscape clips get a glowing band layout in vertical |
 | Color | Natural, warm, cool, black and white, or orange and teal |
+| Voice | Rumble cut, gentle compression, and quiet phrases lifted before transcription and before the mix, so soft delivery stays clear; "Voice: natural" turns it off |
 | Sound | Soft taps and clicks on real cuts, a music bed from `my-sounds` ducked under your voice, mastered to -14 LUFS |
 | Judgment | Doubtful cuts are left in and listed in the notes for you to decide |
 | Agent extras | Motion cards, B-roll, zoom-ins, payoffs, built on the same timeline (`plan.json`) and rendered through Chrome only when asked |

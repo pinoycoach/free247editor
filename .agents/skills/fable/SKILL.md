@@ -161,6 +161,9 @@ that file first, then run the edit; do not retype captions by hand.
 - A rule line `Copy to: <folder>` (a synced Drive folder, a NAS, a shared drive) makes Fable
   copy every draft, final, and notes file there as well as to `outbox/`. If the folder is not
   reachable, the local outbox still has everything and the log says the copy failed.
+- House rule for AI-made footage: it carries a tag on every frame. Set `"tag": "AI-generated"`
+  in `edit.json` (or `--tag`) whenever the source was generated (ViralReel, OpenMontage, any
+  model); Fable draws it small, top right, under the platform band. Real footage gets no tag.
 - When the user approves ("ok na", "approved", "final"), run `node fable.mjs final <slug>`
   (standard quality, `outbox/<slug>-final.mp4`). If you changed `index.html` by hand, add
   `--engine browser` so your graphics are in the final.

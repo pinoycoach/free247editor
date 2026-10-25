@@ -61,6 +61,13 @@ export function buildAss(plan, lay, style) {
   ];
   const ev = [];
   const pop = (from = 86) => `\\fscx${from}\\fscy${from}\\t(0,100,\\fscx100\\fscy100)`;
+  // House rule: a video made by AI says so on every frame. Small, boxed, top right, under the
+  // platform UI band, never over the hook card.
+  if (plan.tag) {
+    const tagSize = Math.round((lay.h > lay.w ? 30 : 26) * (style.scale || 1));
+    styles.push(`Style: Tag,Montserrat Bold,${tagSize},&H00FFFFFF,&H00FFFFFF,&H00000000,&H90000000,-1,0,0,0,100,100,1,0,3,8,0,9,0,30,0,1`);
+    ev.push(`Dialogue: 2,${t(0)},${t(plan.duration)},Tag,,0,0,0,,{\\pos(${lay.w - 40},${L.safeTop + 18})\\an9}${esc(String(plan.tag).toUpperCase())}`);
+  }
   const fit = (text, size, maxWidth) => {
     // Montserrat ExtraBold caps run about 0.72 em per character; shrink long lines to fit.
     const est = text.length * size * 0.72;

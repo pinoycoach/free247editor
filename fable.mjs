@@ -43,7 +43,7 @@ const { values: opt, positionals } = parseArgs({
     slug: { type: 'string' }, format: { type: 'string' }, quality: { type: 'string', default: 'draft' },
     every: { type: 'string', default: '5' }, once: { type: 'boolean' }, 'no-render': { type: 'boolean' },
     engine: { type: 'string', default: 'fast' },
-    script: { type: 'string' },
+    script: { type: 'string' }, tag: { type: 'string' },
   },
 });
 const [command, target] = positionals;
@@ -972,7 +972,9 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   const facePath = join(dir, 'assets/face.json');
   const face = existsSync(facePath) ? (JSON.parse(readFileSync(facePath, 'utf8')).summary || null) : null;
   if (face) style.face = face;
-  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, 0, tl.duration), words: tl.words, dropped: tl.dropped, network: [], face };
+  // The house rule for AI-made footage: a tag on every frame. From edit.json "tag" or --tag.
+  const tag = edit.tag || opt.tag || null;
+  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, 0, tl.duration), words: tl.words, dropped: tl.dropped, network: [], face, tag };
   if (edit.transcription?.provider === 'groq') plan.network.push('audio was sent to Groq for transcription');
   const formats = style.format === 'both' ? ['vertical', 'horizontal'] : [style.format];
   const useBrowser = (edit.style?.engine || opt.engine) === 'browser' || !hasFastFonts(fontsDir);
@@ -1056,6 +1058,7 @@ function notes(dir, edit, result, suggestions) {
     edit.transcription?.missed?.length ? `- LOW COVERAGE: voice with no transcript words at ${edit.transcription.missed.map((m) => `${fmt(m.start)}-${fmt(m.end)}`).join(', ')} (source time). Kept uncut. Listen there and add words with "extra" if needed.` : null,
     plan.hook ? `- Hook card for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}" (${plan.hook.pattern || 'custom'}: ${plan.hook.why || 'set by hand'}). Captions keep running under it.` : '- No hook text (per your style).',
     `- Format ${style.format}, color ${style.grade}${result.renders?.[0]?.engine?.startsWith('browser') ? ', slow push-in on every shot' : ''}.`,
+    plan.tag ? `- Tag "${plan.tag}" on every frame, top right (house rule for AI-made footage).` : null,
     result.renders?.length ? `- Rendered with ${result.renders.map((r) => r.engine + (r.seconds ? ` in ${r.seconds} s` : '')).join(' and ')}.` : null,
     plan.memory?.hogs?.length ? `- Memory was tight (${plan.memory.free} GB free): ${plan.memory.hogs.slice(0, 3).join(', ')}. Fable used the light encoder path.` : null,
     `- Privacy: ${plan.network?.length ? plan.network.join('; ') + '. Everything else stayed on this computer.' : 'nothing left this computer.'}${style.privacy === 'local' ? ' (local-only mode)' : ''}`,
@@ -1174,7 +1177,7 @@ async function edit(video) {
 
 // edit.json is hand-edited, so it is checked before it is trusted. Problems stop the build with a
 // plain message; things that are merely ignored get a warning.
-const KNOWN_KEYS = new Set(['version', 'slug', 'created', 'source', 'transcription', 'script', 'style', 'segments', 'removed', 'deletes', 'suggestions', 'fixes', 'extra', 'hook', 'broll', '_help']);
+const KNOWN_KEYS = new Set(['version', 'slug', 'created', 'source', 'transcription', 'script', 'style', 'segments', 'removed', 'deletes', 'suggestions', 'fixes', 'extra', 'hook', 'broll', 'tag', '_help']);
 function validateEdit(doc) {
   const d = doc.source?.duration;
   if (!Array.isArray(doc.segments) || !doc.segments.length) die('edit.json: segments must be a non-empty list of {src0, src1}');

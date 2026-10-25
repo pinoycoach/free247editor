@@ -148,6 +148,9 @@ API). The default is to use none of them.
   (for example "Captions: lower third" or "Hook: never") plus the user's exact words and the
   date. A rule that only fits one kind of video gets a scope tag at the front: `[9:16]`,
   `[16:9]`, `[<90s]`, or `[>90s]`, so a Reel note never fires on a long horizontal tutorial. Confirm in one line: "Saved as a rule: ...". Never write rules into `fable/`.
+- A rule line `Copy to: <folder>` (a synced Drive folder, a NAS, a shared drive) makes Fable
+  copy every draft, final, and notes file there as well as to `outbox/`. If the folder is not
+  reachable, the local outbox still has everything and the log says the copy failed.
 - When the user approves ("ok na", "approved", "final"), run `node fable.mjs final <slug>`
   (standard quality, `outbox/<slug>-final.mp4`). If you changed `index.html` by hand, add
   `--engine browser` so your graphics are in the final.

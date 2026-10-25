@@ -66,6 +66,16 @@ function run(cmd, args, { cwd = root, quiet = true, shell = false } = {}) {
 }
 const ff = (args, cwd) => run('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { cwd });
 const sha = (s) => createHash('sha256').update(s).digest('hex');
+// A second home for outputs, such as a synced Drive folder, when the rules name one. Never fatal:
+// if the folder is unreachable (drive not mounted) the local outbox still has everything.
+function mirror(file, style) {
+  if (!style?.copyTo) return null;
+  try {
+    mkdirSync(style.copyTo, { recursive: true });
+    copyFileSync(file, join(style.copyTo, basename(file)));
+    return join(style.copyTo, basename(file));
+  } catch (e) { log(`copy to ${style.copyTo} failed: ${e.message.split('\n')[0]}`); return null; }
+}
 // Machines with 8 GB or less (soldered laptops are common) get the light path by default:
 // GPU encoder first, and a warning before each render naming what is eating the memory.
 const GB = 1024 ** 3;
@@ -166,6 +176,8 @@ function readStyle(media = null) {
         else if (/light|some|sound effects|sfx/.test(line)) style.sound = 'light';
       }
       if (/\bvoice:/.test(line)) style.voice = /natural|raw|untouched|as recorded/.test(line) ? 'natural' : 'level';
+      // "Copy to: G:\My Drive\Fable\outbox" mirrors every draft, final, and notes file to that folder.
+      if (/^\s*-?\s*(copy to|mirror( to)?|also save to):/i.test(raw)) { const m = raw.match(/:\s*(.+?)\s*(?:\(.*)?$/); if (m) style.copyTo = m[1].trim().replace(/^["']|["']$/g, ''); }
       if (/retakes?:/.test(line)) style.retakes = /\bcut\b|remove|auto/.test(line) && !never ? 'cut' : 'suggest';
       if (/stutters?:/.test(line)) style.stutters = /suggest|ask|keep/.test(line) || never ? 'suggest' : 'cut';
       if (/privacy|stealth|offline|local only/.test(line)) style.privacy = /local|offline|stealth|only/.test(line) && !/\bno\b|off/.test(line) ? 'local' : 'normal';
@@ -1006,6 +1018,8 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
     }
     copyFileSync(rendered, join(outbox, name));
     outputs.push(join(outbox, name));
+    const mirrored = mirror(join(outbox, name), style);
+    if (mirrored) log(`copied to ${mirrored}`);
     if (fmt === formats[0]) { try { plan.review = reviewSheets(dir, rendered, plan, ff); } catch (e) { log(`review sheets skipped: ${e.message.split('\n')[0]}`); } }
   }
   plan.renders = renders;
@@ -1060,7 +1074,9 @@ function notes(dir, edit, result, suggestions) {
   lines.push('## Give notes', '', 'Say what to change in plain words ("faster", "captions lower", "cut the part about X", "approved").',
     'Your agent edits edit.json (segments are source-time in/out points; fixes change or drop a word by its number; hook and style override my-style.md) and rebuilds.', '');
   const p = join(outbox, `${edit.slug}-notes.md`);
+  if (style.copyTo) lines.splice(lines.indexOf('## Give notes'), 0, `Copies of the drafts and these notes go to ${style.copyTo}.`, '');
   writeFileSync(p, lines.join('\n'));
+  mirror(p, style);
   return p;
 }
 const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${(s % 60).toFixed(2).padStart(5, '0')}`;

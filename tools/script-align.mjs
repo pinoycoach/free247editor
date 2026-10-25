@@ -82,8 +82,11 @@ export function alignScript(words, text, { minSim = 0.5 } = {}) {
     if (after && t1 - t0 < 0.1 * run.length) t0 = Math.max(before ? timeOf.get(before)[0] + 0.05 : 0, t1 - 0.1 * run.length);
     if (after && t1 <= t0) t0 = Math.max(0, t1 - 0.1 * run.length);
     const total = run.reduce((a, k) => a + S[k].length, 0) || 1;
+    // Share the window by word length. With a following word the last insert must end before it
+    // starts; only an open-ended tail gets a comfortable minimum per word.
+    const span = after ? Math.max(0.02 * run.length, t1 - t0) : Math.max(0.12 * run.length, t1 - t0);
     let t = t0;
-    for (const k of run) { const d = Math.max(0.12, (t1 - t0) * S[k].length / total); extra.push({ text: s[k], start: +t.toFixed(3), end: +(t + d).toFixed(3) }); t += d; }
+    for (const k of run) { const d = span * S[k].length / total; extra.push({ text: s[k], start: +t.toFixed(3), end: +(t + d).toFixed(3) }); t += d; }
     run = [];
   };
   let lastMatched = null;

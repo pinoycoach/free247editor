@@ -6,8 +6,9 @@
 //       show the script's words at the moment they were said, and the hook comes from its first line.
 //   node fable.mjs rebuild <slug> [--quality ...]   after editing fable/video-projects/<slug>/edit.json
 //   node fable.mjs final <slug>                      standard-quality render to outbox/<slug>-final.mp4
-//   node fable.mjs stitch <folder> [--caption "..."] [--tag AI-generated] [--final]
+//   node fable.mjs stitch <folder> [--caption "..."] [--sub "2.7-4.04 line"] [--tag AI-generated] [--final]
 //       Finished clips joined in order with hard cuts, their own audio, one fixed caption; nothing re-timed.
+//       --sub (repeatable) adds a small timed line under the caption; it is kept for later runs, --sub "" clears.
 //   node fable.mjs watch [--every 5] [--once]        24/7: edit every new video that lands in inbox/
 //   node fable.mjs status
 //   --engine fast|browser   fast (default): FFmpeg + libass, seconds. browser: HyperFrames + Chrome, minutes.
@@ -47,6 +48,7 @@ const { values: opt, positionals } = parseArgs({
     every: { type: 'string', default: '5' }, once: { type: 'boolean' }, 'no-render': { type: 'boolean' },
     engine: { type: 'string', default: 'fast' },
     script: { type: 'string' }, tag: { type: 'string' }, caption: { type: 'string' }, final: { type: 'boolean' },
+    sub: { type: 'string', multiple: true },
   },
 });
 const [command, target] = positionals;
@@ -1248,6 +1250,15 @@ function stitch(folder) {
   const lines = caption ? wrapCaption(caption) : [];
   writeFileSync(join(dir, 'assets/caption.txt'), lines.join('\n'));
   if (tag) writeFileSync(join(dir, 'assets/tag.txt'), tag);
+  // Timed lines under the caption ("start-end text"), e.g. a word the clip's voice swallows. Kept in
+  // stitch.json so a later run (--final) draws them too.
+  const prev = existsSync(join(dir, 'stitch.json')) ? JSON.parse(readFileSync(join(dir, 'stitch.json'), 'utf8')) : {};
+  const subs = opt.sub ? opt.sub.filter((s) => s.trim()).map((s) => {
+    const m = s.match(/^\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)[\s:]+(.+)$/);
+    if (!m) die(`--sub wants "start-end text", got: ${s}`);
+    return { start: Number(m[1]), end: Number(m[2]), text: m[3].trim() };
+  }) : prev.subs || [];
+  subs.forEach((s, i) => writeFileSync(join(dir, `assets/sub${i}.txt`), s.text));
 
   const inputs = [], chain = [], pairs = [];
   order.forEach((c, i) => {
@@ -1263,6 +1274,14 @@ function stitch(folder) {
   const draw = [];
   // Centered near 60% height: lower-middle, clear of the face and of the bottom 15% (app buttons).
   if (lines.length) draw.push(`drawtext=fontfile=assets/caption.ttf:textfile=assets/caption.txt:fontsize=${size}:fontcolor=white:line_spacing=${Math.round(size * 0.22)}:text_align=C:x=(w-text_w)/2:y=min(h*0.60-text_h/2\\,h*0.85-text_h):borderw=${Math.max(2, Math.round(size / 16))}:bordercolor=black@0.85:shadowx=2:shadowy=3:shadowcolor=black@0.5`);
+  if (subs.length) {
+    // Same look, about 60% the size, just under the caption block (or where it would sit).
+    const sub = Math.round(size * 0.6), gap = Math.round(size * 0.35);
+    const blockH = lines.length ? lines.length * size + (lines.length - 1) * Math.round(size * 0.22) : 0;
+    const top = Math.min(H * 0.6 - blockH / 2, H * 0.85 - blockH);
+    const y = Math.round(Math.min(top + blockH + (lines.length ? gap : 0), H * 0.85 - sub));
+    subs.forEach((s, i) => draw.push(`drawtext=fontfile=assets/caption.ttf:textfile=assets/sub${i}.txt:fontsize=${sub}:fontcolor=white:x=(w-text_w)/2:y=${y}:borderw=${Math.max(2, Math.round(sub / 14))}:bordercolor=black@0.85:shadowx=2:shadowy=2:shadowcolor=black@0.5:enable='between(t\\,${s.start}\\,${s.end})'`));
+  }
   if (tag) draw.push(`drawtext=fontfile=assets/caption.ttf:textfile=assets/tag.txt:fontsize=${Math.round(W * 0.03)}:fontcolor=white@0.85:x=w-text_w-${Math.round(W * 0.04)}:y=h*0.13:borderw=2:bordercolor=black@0.6`);
   chain.push(`[cat]${draw.length ? draw.join(',') : 'null'},format=yuv420p[v]`);
 
@@ -1279,7 +1298,7 @@ function stitch(folder) {
   try { ff(['-i', out, '-vf', `select='${picks.map((n) => `eq(n\\,${n})`).join('+')}',scale=360:-2,tile=${order.length}x1`, '-frames:v', '1', '-update', '1', 'assets/review-shots.png'], dir); } catch {}
 
   const notesPath = join(outbox, `${slug}-notes.md`);
-  writeFileSync(join(dir, 'stitch.json'), JSON.stringify({ slug, source: src, brief: briefFile || null, order: order.map((c) => c.name), by, caption: caption || null, tag, frame: `${W}x${H}`, fps, duration: r3(total) }, null, 2) + '\n');
+  writeFileSync(join(dir, 'stitch.json'), JSON.stringify({ slug, source: src, brief: briefFile || null, order: order.map((c) => c.name), by, caption: caption || null, subs, tag, frame: `${W}x${H}`, fps, duration: r3(total) }, null, 2) + '\n');
   writeFileSync(notesPath, [
     `# ${slug}`, '',
     `${final ? 'Final' : 'Draft'}: ${basename(out)} (${W}x${H}, ${r3(total)} s, H.264/AAC)`,
@@ -1290,6 +1309,7 @@ function stitch(folder) {
     skipped.length ? `- Left out (not in the brief): ${skipped.map((c) => c.name).join(', ')}.` : null,
     '- Each clip keeps its own audio. No music, no sound effects, no speed changes, no pause cuts.',
     caption ? `- Caption on the whole video: "${lines.join(' / ')}", white bold, black outline, centered near 60% height, clear of the bottom 15%.` : '- No caption (none in a brief; add one with --caption "...").',
+    ...subs.map((s) => `- Subtitle under the caption, ${s.start}-${s.end} s: "${s.text}".`),
     tag ? `- House rule: "${tag}" tag top right on every frame.` : '- No AI tag (nothing says the clips are AI-made; add --tag AI-generated if they are).',
     '- Nothing left the computer: no transcription, no uploads.', '',
     '## Check', '',

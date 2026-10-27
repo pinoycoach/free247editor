@@ -137,6 +137,19 @@ API). The default is to use none of them.
 5. Open the draft. Tell the user in 3 to 5 short bullets what you did (the notes file has the
    numbers), list anything the autopilot left in for them to decide, then ask for notes.
 
+## Finished clips to join: a folder of AI clips, a brief, "stitch these"
+
+When the source is several finished clips (a Higgsfield or Kling short, takes meant to play as
+they are) or a brief says not to re-time, do not run `edit`: it cuts pauses and adds its own
+captions. Get the clips into one local or synced folder (a Drive folder is often already on
+`G:\My Drive`), then run `node fable.mjs stitch "<folder>"`. It joins them with hard cuts in
+the order the brief lists (matched by clip length; else by file name), keeps each clip's audio,
+burns the brief's caption (or `--caption "..."`) centered near 60% height, adds the AI tag when
+the brief or file names say AI, and writes `outbox/<slug>-vN.mp4` plus notes. It skips earlier
+outputs in the folder (`*_final.mp4`, `*-v2.mp4`). Look at `assets/review-shots.png` in the
+project to check order and placement. On approval, `--final`. A brief may ask for the video to
+be saved back to its folder; that is an upload, so ask first, then copy it there.
+
 ## A script with the video
 
 If the user wrote the words, put them in a text file with the same name as the video

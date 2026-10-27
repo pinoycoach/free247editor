@@ -6,6 +6,8 @@
 //       show the script's words at the moment they were said, and the hook comes from its first line.
 //   node fable.mjs rebuild <slug> [--quality ...]   after editing fable/video-projects/<slug>/edit.json
 //   node fable.mjs final <slug>                      standard-quality render to outbox/<slug>-final.mp4
+//   node fable.mjs stitch <folder> [--caption "..."] [--tag AI-generated] [--final]
+//       Finished clips joined in order with hard cuts, their own audio, one fixed caption; nothing re-timed.
 //   node fable.mjs watch [--every 5] [--once]        24/7: edit every new video that lands in inbox/
 //   node fable.mjs status
 //   --engine fast|browser   fast (default): FFmpeg + libass, seconds. browser: HyperFrames + Chrome, minutes.
@@ -22,6 +24,7 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { captionLayout, hasFastFonts, renderFast, reviewSheets } from './tools/fast-render.mjs';
 import { alignScript, hookFromScript } from './tools/script-align.mjs';
+import { isOutput, orderClips, parseBrief, stitchFrame, wrapCaption } from './tools/stitch.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -43,7 +46,7 @@ const { values: opt, positionals } = parseArgs({
     slug: { type: 'string' }, format: { type: 'string' }, quality: { type: 'string', default: 'draft' },
     every: { type: 'string', default: '5' }, once: { type: 'boolean' }, 'no-render': { type: 'boolean' },
     engine: { type: 'string', default: 'fast' },
-    script: { type: 'string' }, tag: { type: 'string' },
+    script: { type: 'string' }, tag: { type: 'string' }, caption: { type: 'string' }, final: { type: 'boolean' },
   },
 });
 const [command, target] = positionals;
@@ -1213,6 +1216,92 @@ async function rebuild(slug, finalRender = false) {
 }
 
 // ---------- watch: the 24/7 part ----------
+// ---------- stitch: finished clips joined as they are ----------
+function frameRate(video) {
+  const [n, d] = run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0', video]).trim().split('/').map(Number);
+  const fps = d ? n / d : n;
+  return fps > 0 && fps <= 60 ? Math.round(fps * 1000) / 1000 : FPS;
+}
+function stitch(folder) {
+  const src = resolve(folder);
+  if (!existsSync(src) || !statSync(src).isDirectory()) die(`not a folder: ${folder}`);
+  const names = readdirSync(src);
+  const clips = names.filter((n) => VIDEO_EXT.has(extname(n).toLowerCase()) && !isOutput(n))
+    .map((name) => ({ name, path: join(src, name), ...probe(join(src, name)) }));
+  if (!clips.length) die(`no videos in ${folder}`);
+  const text = (n) => readFileSync(join(src, n), 'utf8');
+  const briefFile = names.find((n) => /\.(txt|md)$/i.test(n) && /brief/i.test(n))
+    || names.find((n) => /\.(txt|md)$/i.test(n) && /caption|^\s*\d+[).]\s*\d/im.test(text(n)));
+  const brief = briefFile ? parseBrief(text(briefFile)) : { clips: [], caption: null, ai: false };
+  const { order, by, skipped } = orderClips(clips, brief.clips);
+  const caption = opt.caption ?? brief.caption;
+  // House rule: AI-made footage carries a tag on every frame.
+  const tag = opt.tag || (brief.ai || clips.some((c) => /higgsfield|kling|veo|sora|ai[-_ ]generated/i.test(c.name)) ? 'AI-generated' : null);
+  const style = readStyle();
+
+  const slug = opt.slug || parse(src).name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'stitch';
+  const dir = join(projects, slug);
+  mkdirSync(join(dir, 'assets'), { recursive: true });
+  const { w: W, h: H } = stitchFrame(order[0].width, order[0].height);
+  const fps = frameRate(order[0].path);
+  copyFileSync(join(fontsDir, 'Montserrat-ExtraBold.ttf'), join(dir, 'assets/caption.ttf'));
+  const lines = caption ? wrapCaption(caption) : [];
+  writeFileSync(join(dir, 'assets/caption.txt'), lines.join('\n'));
+  if (tag) writeFileSync(join(dir, 'assets/tag.txt'), tag);
+
+  const inputs = [], chain = [], pairs = [];
+  order.forEach((c, i) => {
+    inputs.push('-i', c.path);
+    chain.push(`[${i}:v]scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},setsar=1,fps=${fps}[v${i}]`);
+    if (c.hasAudio) chain.push(`[${i}:a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo[a${i}]`);
+    else chain.push(`anullsrc=r=48000:cl=stereo,atrim=0:${r3(c.duration)},aformat=sample_fmts=fltp[a${i}]`);
+    pairs.push(`[v${i}][a${i}]`);
+  });
+  chain.push(`${pairs.join('')}concat=n=${order.length}:v=1:a=1[cat][a]`);
+  const longest = Math.max(1, ...lines.map((l) => l.length));
+  const size = Math.round(Math.min(W * 0.068, (W * 0.88) / (longest * 0.64)));
+  const draw = [];
+  // Centered near 60% height: lower-middle, clear of the face and of the bottom 15% (app buttons).
+  if (lines.length) draw.push(`drawtext=fontfile=assets/caption.ttf:textfile=assets/caption.txt:fontsize=${size}:fontcolor=white:line_spacing=${Math.round(size * 0.22)}:text_align=C:x=(w-text_w)/2:y=min(h*0.60-text_h/2\\,h*0.85-text_h):borderw=${Math.max(2, Math.round(size / 16))}:bordercolor=black@0.85:shadowx=2:shadowy=3:shadowcolor=black@0.5`);
+  if (tag) draw.push(`drawtext=fontfile=assets/caption.ttf:textfile=assets/tag.txt:fontsize=${Math.round(W * 0.03)}:fontcolor=white@0.85:x=w-text_w-${Math.round(W * 0.04)}:y=h*0.13:borderw=2:bordercolor=black@0.6`);
+  chain.push(`[cat]${draw.length ? draw.join(',') : 'null'},format=yuv420p[v]`);
+
+  const final = !!opt.final;
+  const out = join(outbox, final ? `${slug}-final.mp4` : `${slug}-v${nextVersion(slug, '')}.mp4`);
+  const crf = final ? (opt.quality === 'high' ? 16 : 18) : ({ standard: 18, high: 16 }[opt.quality] ?? 20);
+  memoryCheck();
+  log(`stitching ${order.length} clips (${by} order) into ${basename(out)}`);
+  ff([...inputs, '-filter_complex', chain.join(';'), '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-preset', final ? 'medium' : 'veryfast', '-crf', String(crf), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', out], dir);
+  const total = probe(out).duration;
+  // One frame from the middle of each clip, side by side: checks order and caption placement.
+  let t = 0;
+  const picks = order.map((c) => { const at = t + c.duration / 2; t += c.duration; return Math.round(at * fps); });
+  try { ff(['-i', out, '-vf', `select='${picks.map((n) => `eq(n\\,${n})`).join('+')}',scale=360:-2,tile=${order.length}x1`, '-frames:v', '1', '-update', '1', 'assets/review-shots.png'], dir); } catch {}
+
+  const notesPath = join(outbox, `${slug}-notes.md`);
+  writeFileSync(join(dir, 'stitch.json'), JSON.stringify({ slug, source: src, brief: briefFile || null, order: order.map((c) => c.name), by, caption: caption || null, tag, frame: `${W}x${H}`, fps, duration: r3(total) }, null, 2) + '\n');
+  writeFileSync(notesPath, [
+    `# ${slug}`, '',
+    `${final ? 'Final' : 'Draft'}: ${basename(out)} (${W}x${H}, ${r3(total)} s, H.264/AAC)`,
+    `Source: ${src}${briefFile ? `, brief ${briefFile}` : ''}`, '',
+    '## What Fable did', '',
+    `- Joined ${order.length} clips with hard cuts, in ${by} order:`,
+    ...order.map((c, i) => `  ${i + 1}. ${c.name} (${c.duration.toFixed(1)} s${c.hasAudio ? '' : ', no audio: silence'})`),
+    skipped.length ? `- Left out (not in the brief): ${skipped.map((c) => c.name).join(', ')}.` : null,
+    '- Each clip keeps its own audio. No music, no sound effects, no speed changes, no pause cuts.',
+    caption ? `- Caption on the whole video: "${lines.join(' / ')}", white bold, black outline, centered near 60% height, clear of the bottom 15%.` : '- No caption (none in a brief; add one with --caption "...").',
+    tag ? `- House rule: "${tag}" tag top right on every frame.` : '- No AI tag (nothing says the clips are AI-made; add --tag AI-generated if they are).',
+    '- Nothing left the computer: no transcription, no uploads.', '',
+    '## Check', '',
+    `- fable/video-projects/${slug}/assets/review-shots.png: one frame per clip, for order and caption placement.`,
+    briefFile && /upload|save (it )?back|drive folder/i.test(text(briefFile)) ? '- The brief asks for the video to be saved back to its folder. Fable never uploads on its own; your agent copies it there when you say so.' : null,
+    final ? null : `- Approved? \`node fable.mjs stitch "${folder}" --final\` writes ${slug}-final.mp4. Change the caption with --caption "...".`,
+  ].filter((l) => l !== null).join('\n') + '\n');
+  for (const f of [out, notesPath]) { const m = mirror(f, style); if (m) log(`copied to ${m}`); }
+  log(`done: ${out}`);
+  return { slug, out, notes: notesPath, order, caption, tag };
+}
+
 function watch() {
   mkdirSync(inbox, { recursive: true });
   const stateDir = join(root, '.fable'), statePath = join(stateDir, 'watch.json');
@@ -1273,10 +1362,11 @@ if (isMain) {
     case 'edit': if (!target) die('usage: node fable.mjs edit <video>'); await edit(target); break;
     case 'rebuild': if (!target) die('usage: node fable.mjs rebuild <slug>'); await rebuild(target); break;
     case 'final': if (!target) die('usage: node fable.mjs final <slug>'); await rebuild(target, true); break;
+    case 'stitch': if (!target) die('usage: node fable.mjs stitch <folder>'); stitch(target); break;
     case 'watch': watch(); break;
     case 'status': status(); break;
     default:
-      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 12).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 14).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(command ? 1 : 0);
   }
 }

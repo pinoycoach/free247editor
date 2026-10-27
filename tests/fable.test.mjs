@@ -134,3 +134,23 @@ test('script-aware captions: the script spelling wins, missed words are inserted
   assert.equal(hookFromScript(script), 'How does Phi Phi pray?');
   assert.equal(hookFromScript('Line one here.\nLine two.'), 'Line one here');
 });
+
+test('stitch: the brief sets clip order and caption; saved outputs are not clips', async () => {
+  const { parseBrief, orderClips, wrapCaption, isOutput } = await import('../tools/stitch.mjs');
+  const b = parseBrief('Kling 3.0 short\n\nCLIPS (in order):\n1) 4s — "Welcome"\n2) 5s — "Exits"\n3) 6s — "Seated"\n\nCAPTION (on screen the whole video):\nFormer flight attendant\'s first day as a wedding officiant\nStyle: white bold\n');
+  assert.deepEqual(b.clips.map((c) => c.seconds), [4, 5, 6]);
+  assert.equal(b.caption, "Former flight attendant's first day as a wedding officiant");
+  assert.ok(b.ai);
+  assert.equal(parseBrief('Caption: Hello there').caption, 'Hello there');
+  const clips = [{ name: 'All-guests.mp4', duration: 6.04 }, { name: 'The-officiant-in.mp4', duration: 4.04 }, { name: 'The-officiant-keeps.mp4', duration: 5.04 }, { name: 'extra.mp4', duration: 9 }];
+  const r = orderClips(clips, b.clips);
+  assert.equal(r.by, 'brief durations');
+  assert.deepEqual(r.order.map((c) => c.name), ['The-officiant-in.mp4', 'The-officiant-keeps.mp4', 'All-guests.mp4']);
+  assert.deepEqual(r.skipped.map((c) => c.name), ['extra.mp4']);
+  // Two clips the same length: the brief cannot tell them apart, so file name order.
+  assert.equal(orderClips([{ name: 'b.mp4', duration: 4 }, { name: 'a.mp4', duration: 4 }], [{ seconds: 4 }, { seconds: 4 }]).order[0].name, 'a.mp4');
+  assert.deepEqual(orderClips([{ name: 'clip-10.mp4', duration: 1 }, { name: 'clip-2.mp4', duration: 1 }]).order.map((c) => c.name), ['clip-2.mp4', 'clip-10.mp4']);
+  const lines = wrapCaption(b.caption);
+  assert.ok(lines.length <= 3 && lines.join(' ') === b.caption);
+  assert.ok(isOutput('officiant_final.mp4') && isOutput('reel-v2.mp4') && !isOutput('The-officiant-in.mp4'));
+});

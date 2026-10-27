@@ -99,6 +99,7 @@ YouTube and it gets its own framing and text placement.
 | Private | No telemetry, no update checks; the notes say exactly what left the computer (Groq audio, stock key words) or that nothing did; render cache off, temp files cleaned after every job |
 | Learning | Your notes are saved as rules in `my-rules.md` and applied every time; a rule can be scoped with `[9:16]`, `[16:9]`, `[<90s]`, or `[>90s]` |
 | Share | A `Copy to: <folder>` rule mirrors every draft, final, and notes file to a synced Drive folder or shared drive |
+| Stitch | `node fable.mjs stitch <folder>` joins finished clips (an AI short, a brief) with hard cuts, their own audio, one fixed caption, and the AI tag; nothing re-timed |
 | 24/7 | `node fable.mjs watch` edits everything that lands in the inbox |
 
 ## What you need

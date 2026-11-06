@@ -11,10 +11,12 @@
 //       --sub (repeatable) adds a small timed line under the caption; it is kept for later runs, --sub "" clears.
 //   node fable.mjs watch [--every 5] [--once]        24/7: edit every new video that lands in inbox/
 //   node fable.mjs status
+//   node fable.mjs review <slug|draft.mp4> [--dry-run]  opt-in: Gemini watches the draft, notes to outbox/<slug>-review.md
 //   --engine fast|browser   fast (default): FFmpeg + libass, seconds. browser: HyperFrames + Chrome, minutes.
 //
 // Every stage is local and free: FFmpeg for cuts, captions, and sound; Groq or faster-whisper for
-// words. Nothing is sent anywhere (HyperFrames telemetry and update checks are switched off).
+// words. `review` is the one exception: it uploads the draft to Google, only when you run it.
+// Otherwise nothing is sent anywhere (HyperFrames telemetry and update checks are switched off).
 // Style comes from my-style.md; rules from my-rules.md.
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
@@ -49,6 +51,7 @@ const { values: opt, positionals } = parseArgs({
     engine: { type: 'string', default: 'fast' },
     script: { type: 'string' }, tag: { type: 'string' }, caption: { type: 'string' }, final: { type: 'boolean' },
     sub: { type: 'string', multiple: true },
+    'dry-run': { type: 'boolean' }, model: { type: 'string' },
   },
 });
 const [command, target] = positionals;
@@ -1385,8 +1388,15 @@ if (isMain) {
     case 'stitch': if (!target) die('usage: node fable.mjs stitch <folder>'); stitch(target); break;
     case 'watch': watch(); break;
     case 'status': status(); break;
+    case 'review': {
+      if (!target) die('usage: node fable.mjs review <slug|draft.mp4> [--dry-run]');
+      try { process.loadEnvFile(join(root, '.env')); } catch {}
+      const { review } = await import('./tools/review.mjs');
+      try { await review(target, { root, readStyle, mirror, model: opt.model, dryRun: opt['dry-run'], log }); } catch (e) { die(e.message); }
+      break;
+    }
     default:
-      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 14).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 15).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(command ? 1 : 0);
   }
 }

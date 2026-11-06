@@ -14,8 +14,9 @@ editing or coding terms. Run every command from the repo root unless a step says
 | Path | What it is |
 | --- | --- |
 | `setup.mjs` | One-time setup. Safe to re-run. |
-| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `watch`, `status`. |
+| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `watch`, `status`, `review`. |
 | `tools/transcribe.mjs` | Free word-level transcription (Groq, or `--local` faster-whisper). |
+| `tools/review.mjs` | Opt-in draft review by Gemini (`node fable.mjs review <slug>`). |
 | `inbox/` | Raw videos the user wants edited. |
 | `outbox/` | Every draft and final, named `<slug>-v1.mp4`, `<slug>-final.mp4`, plus `<slug>-notes.md`. |
 | `my-style.md` | The user's style, written during style setup. |
@@ -160,6 +161,19 @@ dropped. A first line `Hook: ...` (or simply the first line) becomes the first h
 The notes report how many words matched. When the user pastes a script in chat, save it as
 that file first, then run the edit; do not retype captions by hand.
 
+## A second opinion: "review this", "what does Gemini think", "check the draft"
+
+`node fable.mjs review <slug>` (or a path to an .mp4) has Gemini watch the newest draft, frames
+and sound, and writes `outbox/<slug>-review.md`: a verdict, a hook score with a stronger opening
+from the words actually said, and timed notes marked Fix or Consider. It needs a free key from
+https://aistudio.google.com/apikey as `GEMINI_API_KEY=` in `.env` (get it the same way as the
+Groq key; never print it). It uploads the draft to Google and deletes it after, so run it only
+when the user asks for a review or has a rule that says to, never inside `edit` or `watch`; it
+refuses in local-only privacy mode. `--dry-run` shows what would be sent without uploading.
+Read the review, then tell the user the notes worth acting on in plain words and apply only the
+ones they agree to, as normal notes. The review is the model's opinion: the user's notes and
+`my-rules.md` win over it, and never add footage or music because a review suggested it.
+
 ## Notes become rules
 
 - Apply each note, render the next version (`-v2`, `-v3`, ...), and open it. Most notes are a
@@ -207,6 +221,6 @@ disk, not memory, is what stops a render first.
 
 - Post, upload, or send a video anywhere. Say truthfully what left the computer: the notes
   file names Groq (audio) and the stock site (key words) when they were used.
-- Print or log the Groq key.
+- Print or log the Groq or Gemini key.
 - Commit or publish anything in `inbox/`, `outbox/`, `my-style.md`, `my-rules.md`,
   `my-sounds/`, or `fable/video-projects/`.

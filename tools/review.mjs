@@ -6,7 +6,7 @@
 // Free on Gemini's free tier: a key from https://aistudio.google.com/apikey as GEMINI_API_KEY in
 // .env. The draft is uploaded to Google, reviewed, then deleted from their storage. Blocked in
 // local-only privacy mode. This file has no import of fable.mjs (that would be a cycle with
-// top-level await); fable.mjs passes readStyle and mirror in.
+// top-level await); fable.mjs passes readStyle, mirror, deliver and outboxes in.
 import { readFileSync, writeFileSync, existsSync, readdirSync, statSync, mkdirSync } from 'node:fs';
 import { basename, join, resolve } from 'node:path';
 
@@ -47,7 +47,8 @@ export const SCHEMA = {
   required: ['summary', 'verdict', 'hook', 'issues', 'keep'],
 };
 
-// The draft to review: a path, or the newest <slug>-vN.mp4 / <slug>-final.mp4 in the outbox.
+// The draft to review: a path, or the newest <slug>-vN.mp4 / <slug>-final.mp4 in the outbox
+// (one folder, or a list: the save-to folder and the local outbox).
 export function findDraft(target, outbox) {
   if (existsSync(target) && statSync(target).isFile()) {
     const file = resolve(target);
@@ -55,15 +56,15 @@ export function findDraft(target, outbox) {
   }
   const slug = target.replace(/\.mp4$/i, '').replace(/-(v\d+|final)$/i, '');
   const re = new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(v\\d+|final)\\.mp4$`, 'i');
-  const drafts = existsSync(outbox) ? readdirSync(outbox).filter((f) => re.test(f)) : [];
+  const drafts = [].concat(outbox).filter((d) => existsSync(d)).flatMap((d) => readdirSync(d).filter((f) => re.test(f)).map((f) => join(d, f)));
   if (!drafts.length) return null;
-  drafts.sort((a, b) => statSync(join(outbox, b)).mtimeMs - statSync(join(outbox, a)).mtimeMs);
-  return { file: join(outbox, drafts[0]), slug };
+  drafts.sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  return { file: drafts[0], slug };
 }
 
 // What the reviewer is told: the user's style and rules (minus file paths), and what Fable did.
 export function buildPrompt({ styleText = '', rulesText = '', notesText = '' } = {}) {
-  const rules = rulesText.split(/\r?\n/).filter((l) => !/^\s*-?\s*copy to:/i.test(l)).join('\n').trim();
+  const rules = rulesText.split(/\r?\n/).filter((l) => !/^\s*-?\s*(copy to|mirror( to)?|also save to|save to|outbox):/i.test(l)).join('\n').trim();
   return [
     'You are reviewing a short social video draft for a creator before they post it. Watch the whole video with sound.',
     'Judge it as a viewer scrolling a phone feed would: does the opening stop the scroll, is it clear what the video is about',
@@ -137,19 +138,19 @@ async function upload(file, key) {
   return f;
 }
 
-// Options: readStyle and mirror come from fable.mjs. Returns { out, review } or { dryRun }.
-export async function review(target, { root, readStyle, mirror, model = process.env.GEMINI_REVIEW_MODEL || DEFAULT_MODEL, dryRun = false, log = console.log }) {
-  const outbox = join(root, 'outbox');
-  const found = findDraft(target, outbox);
+// Options: readStyle, mirror, deliver and outboxes come from fable.mjs. Returns { out, review } or { dryRun }.
+export async function review(target, { root, readStyle, mirror, deliver, outboxes, model = process.env.GEMINI_REVIEW_MODEL || DEFAULT_MODEL, dryRun = false, log = console.log }) {
+  const style = readStyle();
+  const dirs = outboxes ? outboxes(style) : [join(root, 'outbox')];
+  const found = findDraft(target, dirs);
   if (!found) throw new Error(`no draft found for "${target}" (give a slug from outbox/ or a path to an .mp4)`);
   const { file, slug } = found;
-  const style = readStyle();
   if (style.privacy === 'local') throw new Error('local-only privacy mode is on, and a review uploads the draft to Google. Turn local-only off in my-rules.md to use it.');
   const read = (p) => (existsSync(p) ? readFileSync(p, 'utf8') : '');
   const prompt = buildPrompt({
     styleText: read(join(root, 'my-style.md')),
     rulesText: read(join(root, 'my-rules.md')),
-    notesText: read(join(outbox, `${slug}-notes.md`)),
+    notesText: dirs.map((d) => read(join(d, `${slug}-notes.md`))).find(Boolean) || '',
   });
   const mb = (statSync(file).size / 1e6).toFixed(1);
   if (dryRun) {
@@ -187,8 +188,9 @@ export async function review(target, { root, readStyle, mirror, model = process.
     mkdirSync(join(project, 'assets'), { recursive: true });
     writeFileSync(join(project, 'assets', 'review.json'), JSON.stringify({ draft: basename(file), model, ...result }, null, 2));
   }
-  const out = join(outbox, `${slug}-review.md`);
-  writeFileSync(out, toMarkdown(result, { slug, draft: file, model }));
+  const md = toMarkdown(result, { slug, draft: file, model });
+  const out = deliver ? deliver(`${slug}-review.md`, style, (p) => writeFileSync(p, md)) : join(root, 'outbox', `${slug}-review.md`);
+  if (!deliver) { mkdirSync(join(root, 'outbox'), { recursive: true }); writeFileSync(out, md); }
   const m = mirror?.(out, style);
   if (m) log(`copied to ${m}`);
   log(`review: ${out} (${result.verdict}, hook ${result.hook?.score}/10, ${result.issues?.length || 0} notes)`);

@@ -82,12 +82,31 @@ const sha = (s) => createHash('sha256').update(s).digest('hex');
 // if the folder is unreachable (drive not mounted) the local outbox still has everything.
 function mirror(file, style) {
   if (!style?.copyTo) return null;
+  if (resolve(dirname(file)) === resolve(style.copyTo)) return null; // already saved there
   try {
     mkdirSync(style.copyTo, { recursive: true });
     copyFileSync(file, join(style.copyTo, basename(file)));
     return join(style.copyTo, basename(file));
   } catch (e) { log(`copy to ${style.copyTo} failed: ${e.message.split('\n')[0]}`); return null; }
 }
+// "Save to: <folder>" in the rules makes that folder the outbox (a synced Drive folder, so nothing
+// is kept twice on a full laptop). Never fatal: if the folder is unreachable or full, the file lands
+// in the local outbox and the log says so. write(path) writes the file; returns where it went.
+function deliver(name, style, write) {
+  if (style?.saveTo) {
+    const p = join(style.saveTo, name);
+    try { mkdirSync(style.saveTo, { recursive: true }); write(p); return p; } catch (e) {
+      try { rmSync(p, { force: true }); } catch {}
+      log(`save to ${style.saveTo} failed (${e.message.split('\n')[0]}); kept in outbox/ instead`);
+    }
+  }
+  mkdirSync(outbox, { recursive: true });
+  const p = join(outbox, name);
+  write(p);
+  return p;
+}
+// Every folder an output may be in: the save-to folder first, then the local outbox.
+const outboxes = (style) => [...new Set([style?.saveTo, outbox].filter(Boolean).map((d) => resolve(d)))].filter((d) => existsSync(d));
 // Machines with 8 GB or less (soldered laptops are common) get the light path by default:
 // GPU encoder first, and a warning before each render naming what is eating the memory.
 const GB = 1024 ** 3;
@@ -190,6 +209,8 @@ function readStyle(media = null) {
       if (/\bvoice:/.test(line)) style.voice = /natural|raw|untouched|as recorded/.test(line) ? 'natural' : 'level';
       // "Copy to: G:\My Drive\Fable\outbox" mirrors every draft, final, and notes file to that folder.
       if (/^\s*-?\s*(copy to|mirror( to)?|also save to):/i.test(raw)) { const m = raw.match(/:\s*(.+?)\s*(?:\(.*)?$/); if (m) style.copyTo = m[1].trim().replace(/^["']|["']$/g, ''); }
+      // "Save to: G:\My Drive\Stitcher\outbox" saves outputs there in place of outbox/ (one copy, not two).
+      else if (/^\s*-?\s*(save to|outbox):/i.test(raw)) { const m = raw.match(/:\s*(.+?)\s*(?:\(.*)?$/); if (m) style.saveTo = m[1].trim().replace(/^["']|["']$/g, ''); }
       if (/retakes?:/.test(line)) style.retakes = /\bcut\b|remove|auto/.test(line) && !never ? 'cut' : 'suggest';
       if (/stutters?:/.test(line)) style.stutters = /suggest|ask|keep/.test(line) || never ? 'suggest' : 'cut';
       if (/privacy|stealth|offline|local only/.test(line)) style.privacy = /local|offline|stealth|only/.test(line) && !/\bno\b|off/.test(line) ? 'local' : 'normal';
@@ -950,10 +971,11 @@ function prepareBroll(dir, broll, lay) {
 }
 
 // ---------- the pipeline ----------
-function nextVersion(slug, suffix) {
+// Counts versions in every outbox folder, so a v3 never overwrites a v1 kept on Drive.
+function nextVersion(slug, suffix, style) {
   mkdirSync(outbox, { recursive: true });
   const re = new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}${suffix}-v(\\d+)\\.mp4$`);
-  const n = readdirSync(outbox).map((f) => Number(f.match(re)?.[1] || 0)).reduce((a, b) => Math.max(a, b), 0);
+  const n = outboxes(style).flatMap((d) => readdirSync(d)).map((f) => Number(f.match(re)?.[1] || 0)).reduce((a, b) => Math.max(a, b), 0);
   return n + 1;
 }
 function render(dir, compositionFile, out, quality) {
@@ -1025,7 +1047,7 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
     plan.memory = memoryCheck();
     if (useBrowser && lowMemoryMachine()) log('browser renderer on an 8 GB machine: one worker, minutes per draft, and Chrome must be closed. Use it only for motion-graphics specials.');
     const suffix = fmt === 'horizontal' && formats.length > 1 ? '-horizontal' : '';
-    const name = finalName ? `${edit.slug}${suffix}-final.mp4` : `${edit.slug}${suffix}-v${nextVersion(edit.slug, suffix)}.mp4`;
+    const name = finalName ? `${edit.slug}${suffix}-final.mp4` : `${edit.slug}${suffix}-v${nextVersion(edit.slug, suffix, style)}.mp4`;
     const out = `renders/${parse(name).name}.mp4`;
     let rendered;
     if (useBrowser) {
@@ -1039,9 +1061,10 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
       renders.push({ engine: `ffmpeg (${r.encoder})`, seconds: r.seconds });
       log(`rendered ${out} in ${r.seconds}s with ${r.encoder}`);
     }
-    copyFileSync(rendered, join(outbox, name));
-    outputs.push(join(outbox, name));
-    const mirrored = mirror(join(outbox, name), style);
+    const saved = deliver(name, style, (p) => copyFileSync(rendered, p));
+    outputs.push(saved);
+    if (style.saveTo && saved.startsWith(resolve(style.saveTo))) log(`saved to ${saved}`);
+    const mirrored = mirror(saved, style);
     if (mirrored) log(`copied to ${mirrored}`);
     if (fmt === formats[0]) { try { plan.review = reviewSheets(dir, rendered, plan, ff); } catch (e) { log(`review sheets skipped: ${e.message.split('\n')[0]}`); } }
   }
@@ -1098,9 +1121,8 @@ function notes(dir, edit, result, suggestions) {
   }
   lines.push('## Give notes', '', 'Say what to change in plain words ("faster", "captions lower", "cut the part about X", "approved").',
     'Your agent edits edit.json (segments are source-time in/out points; fixes change or drop a word by its number; hook and style override my-style.md) and rebuilds.', '');
-  const p = join(outbox, `${edit.slug}-notes.md`);
   if (style.copyTo) lines.splice(lines.indexOf('## Give notes'), 0, `Copies of the drafts and these notes go to ${style.copyTo}.`, '');
-  writeFileSync(p, lines.join('\n'));
+  const p = deliver(`${edit.slug}-notes.md`, style, (f) => writeFileSync(f, lines.join('\n')));
   mirror(p, style);
   return p;
 }
@@ -1289,20 +1311,22 @@ function stitch(folder) {
   chain.push(`[cat]${draw.length ? draw.join(',') : 'null'},format=yuv420p[v]`);
 
   const final = !!opt.final;
-  const out = join(outbox, final ? `${slug}-final.mp4` : `${slug}-v${nextVersion(slug, '')}.mp4`);
+  const outName = final ? `${slug}-final.mp4` : `${slug}-v${nextVersion(slug, '', style)}.mp4`;
+  const rendered = join(dir, outName);
   const crf = final ? (opt.quality === 'high' ? 16 : 18) : ({ standard: 18, high: 16 }[opt.quality] ?? 20);
   memoryCheck();
-  log(`stitching ${order.length} clips (${by} order) into ${basename(out)}`);
-  ff([...inputs, '-filter_complex', chain.join(';'), '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-preset', final ? 'medium' : 'veryfast', '-crf', String(crf), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', out], dir);
-  const total = probe(out).duration;
+  log(`stitching ${order.length} clips (${by} order) into ${outName}`);
+  ff([...inputs, '-filter_complex', chain.join(';'), '-map', '[v]', '-map', '[a]', '-c:v', 'libx264', '-preset', final ? 'medium' : 'veryfast', '-crf', String(crf), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', rendered], dir);
+  const total = probe(rendered).duration;
   // One frame from the middle of each clip, side by side: checks order and caption placement.
   let t = 0;
   const picks = order.map((c) => { const at = t + c.duration / 2; t += c.duration; return Math.round(at * fps); });
-  try { ff(['-i', out, '-vf', `select='${picks.map((n) => `eq(n\\,${n})`).join('+')}',scale=360:-2,tile=${order.length}x1`, '-frames:v', '1', '-update', '1', 'assets/review-shots.png'], dir); } catch {}
+  try { ff(['-i', rendered, '-vf', `select='${picks.map((n) => `eq(n\\,${n})`).join('+')}',scale=360:-2,tile=${order.length}x1`, '-frames:v', '1', '-update', '1', 'assets/review-shots.png'], dir); } catch {}
 
-  const notesPath = join(outbox, `${slug}-notes.md`);
+  const out = deliver(outName, style, (p) => copyFileSync(rendered, p));
+  rmSync(rendered, { force: true }); // one copy only: the laptop is short on disk
   writeFileSync(join(dir, 'stitch.json'), JSON.stringify({ slug, source: src, brief: briefFile || null, order: order.map((c) => c.name), by, caption: caption || null, subs, tag, frame: `${W}x${H}`, fps, duration: r3(total) }, null, 2) + '\n');
-  writeFileSync(notesPath, [
+  const notesPath = deliver(`${slug}-notes.md`, style, (p) => writeFileSync(p, [
     `# ${slug}`, '',
     `${final ? 'Final' : 'Draft'}: ${basename(out)} (${W}x${H}, ${r3(total)} s, H.264/AAC)`,
     `Source: ${src}${briefFile ? `, brief ${briefFile}` : ''}`, '',
@@ -1319,7 +1343,7 @@ function stitch(folder) {
     `- fable/video-projects/${slug}/assets/review-shots.png: one frame per clip, for order and caption placement.`,
     briefFile && /upload|save (it )?back|drive folder/i.test(text(briefFile)) ? '- The brief asks for the video to be saved back to its folder. Fable never uploads on its own; your agent copies it there when you say so.' : null,
     final ? null : `- Approved? \`node fable.mjs stitch "${folder}" --final\` writes ${slug}-final.mp4. Change the caption with --caption "...".`,
-  ].filter((l) => l !== null).join('\n') + '\n');
+  ].filter((l) => l !== null).join('\n') + '\n'));
   for (const f of [out, notesPath]) { const m = mirror(f, style); if (m) log(`copied to ${m}`); }
   log(`done: ${out}`);
   return { slug, out, notes: notesPath, order, caption, tag };
@@ -1333,7 +1357,7 @@ function watch() {
   const save = () => writeFileSync(statePath, JSON.stringify(state, null, 2));
   const every = Math.max(2, Number(opt.every) || 5) * 1000;
   const seen = new Map();
-  log(`watching ${inbox} every ${every / 1000}s. Drop a video in; drafts land in outbox/. Ctrl+C to stop.`);
+  log(`watching ${inbox} every ${every / 1000}s. Drop a video in; drafts land in ${readStyle().saveTo || 'outbox/'}. Ctrl+C to stop.`);
   let busy = false;
   const tick = async () => {
     if (busy) return;
@@ -1356,7 +1380,7 @@ function watch() {
         state.done[key] = { slug, outputs, at: new Date().toISOString() };
       } catch (e) {
         state.done[key] = { error: e.message, at: new Date().toISOString() };
-        writeFileSync(join(outbox, `${parse(name).name}-error.md`), `# Fable could not edit ${name}\n\n${e.message}\n\nFix the cause and drop the file in again (or touch it) to retry.\n`);
+        deliver(`${parse(name).name}-error.md`, readStyle(), (f) => writeFileSync(f, `# Fable could not edit ${name}\n\n${e.message}\n\nFix the cause and drop the file in again (or touch it) to retry.\n`));
         console.error(`[fable] ${name}: ${e.message}`);
       }
       save();
@@ -1370,9 +1394,10 @@ function watch() {
 function status() {
   const list = existsSync(projects) ? readdirSync(projects).filter((d) => existsSync(join(projects, d, 'edit.json'))) : [];
   if (!list.length) return log('no Fable projects yet. Try: node fable.mjs edit inbox/<video>');
+  const dirs = outboxes(readStyle());
   for (const slug of list) {
     const e = JSON.parse(readFileSync(join(projects, slug, 'edit.json'), 'utf8'));
-    const outs = existsSync(outbox) ? readdirSync(outbox).filter((f) => f.startsWith(slug) && f.endsWith('.mp4')) : [];
+    const outs = dirs.flatMap((d) => readdirSync(d)).filter((f) => f.startsWith(slug) && f.endsWith('.mp4'));
     console.log(`${slug}: ${e.source.duration.toFixed(1)}s source, ${e.segments.length} pieces, ${e.suggestions?.length || 0} suggestions, outbox: ${outs.join(', ') || 'none'}`);
   }
 }
@@ -1392,7 +1417,7 @@ if (isMain) {
       if (!target) die('usage: node fable.mjs review <slug|draft.mp4> [--dry-run]');
       try { process.loadEnvFile(join(root, '.env')); } catch {}
       const { review } = await import('./tools/review.mjs');
-      try { await review(target, { root, readStyle, mirror, model: opt.model, dryRun: opt['dry-run'], log }); } catch (e) { die(e.message); }
+      try { await review(target, { root, readStyle, mirror, deliver, outboxes, model: opt.model, dryRun: opt['dry-run'], log }); } catch (e) { die(e.message); }
       break;
     }
     default:

@@ -188,6 +188,10 @@ ones they agree to, as normal notes. The review is the model's opinion: the user
 - A rule line `Copy to: <folder>` (a synced Drive folder, a NAS, a shared drive) makes Fable
   copy every draft, final, and notes file there as well as to `outbox/`. If the folder is not
   reachable, the local outbox still has everything and the log says the copy failed.
+- A rule line `Save to: <folder>` makes that folder the outbox: drafts, finals, notes, and
+  reviews are written there only, so a full laptop keeps one copy. Version numbers count both
+  folders. If the folder is unreachable or full, the file lands in `outbox/` and the log says
+  so. Hand-built recipes (a project's `build.mjs`) still write to `outbox/`; move those by hand.
 - House rule for AI-made footage: it carries a tag on every frame. Set `"tag": "AI-generated"`
   in `edit.json` (or `--tag`) whenever the source was generated (ViralReel, OpenMontage, any
   model); Fable draws it small, top right, under the platform band. Real footage gets no tag.

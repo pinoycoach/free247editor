@@ -19,10 +19,22 @@ test('the newest draft of a slug is the one reviewed, a path is taken as given',
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('the prompt carries style and rules but never the Copy to folder', () => {
+test('with a save-to folder, the newest draft in either folder is reviewed', () => {
+  const drive = mkdtempSync(join(tmpdir(), 'fable-drive-')), local = mkdtempSync(join(tmpdir(), 'fable-local-'));
+  try {
+    for (const [d, f, t] of [[drive, 'cat-v1.mp4', 1000], [drive, 'cat-v2.mp4', 3000], [local, 'cat-v3.mp4', 2000]]) {
+      writeFileSync(join(d, f), 'x');
+      utimesSync(join(d, f), t, t);
+    }
+    assert.equal(findDraft('cat', [drive, local]).file, join(drive, 'cat-v2.mp4'));
+    assert.equal(findDraft('cat', [join(drive, 'missing'), local]).file, join(local, 'cat-v3.mp4'));
+  } finally { for (const d of [drive, local]) rmSync(d, { recursive: true, force: true }); }
+});
+
+test('the prompt carries style and rules but never the Copy to or Save to folder', () => {
   const p = buildPrompt({
     styleText: '- Captions: word by word.',
-    rulesText: '- Names: the dog is "Phi Phi".\n- Copy to: G:\\My Drive\\Stitcher\\outbox',
+    rulesText: '- Names: the dog is "Phi Phi".\n- Copy to: G:\\My Drive\\Stitcher\\outbox\n- Save to: G:\\My Drive\\Stitcher\\outbox',
     notesText: 'Cut 4 pauses.',
   });
   assert.match(p, /word by word/);

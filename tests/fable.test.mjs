@@ -346,3 +346,42 @@ test('text boxes follow the same layout the renderer draws with', async () => {
   assert.ok(cap.y0 < L.capY && cap.y1 > L.capY && cap.x0 >= 0 && cap.x1 <= 1080);
   assert.ok(hook.y1 <= cap.y0 + 40); // the card sits above the caption line
 });
+
+test('post package: captions and hashtags come from the words in the video, never invented', async () => {
+  const { sentences, hashtags, captionOptions, coverCenter, postSheet, screenWords } = await import('../tools/post.mjs');
+  const say = (text) => text.split(' ').map((t, i) => W(t, i * 0.3, i * 0.3 + 0.25));
+  const words = say("Does any of this decide anything? No. For 24 days, the Senate kept silence. It's their stalemate, not yours. When the Senate is hollow, flood control waits. Flood control is the test. A time to keep silence, a time to speak.");
+  assert.equal(sentences(words).length, 7);
+  assert.equal(sentences(words)[0], 'Does any of this decide anything?');
+  // Only what the video keeps coming back to: a name, a repeated word, a repeated pair, the title.
+  const tags = hashtags(words, [], 6, ['THEIR STALEMATE,', 'NOT YOURS']);
+  assert.ok(tags.includes('#senate') && tags.includes('#silence') && tags.includes('#floodcontrol') && tags.includes('#stalemate'));
+  assert.ok(!tags.includes('#flood') && !tags.includes('#control')); // the pair replaced its words
+  assert.ok(!tags.includes('#decide') && !tags.includes('#hollow') && !tags.includes('#time')); // said once, or a filler
+  // Standing tags from my-rules.md come first and are never dropped.
+  assert.deepEqual(hashtags(words, ['#Pinoy', '#fyp'], 3).slice(0, 2), ['#pinoy', '#fyp']);
+  // Caption options: the title (when it is a phrase), the opening line, the closing line; no repeats.
+  const opts = captionOptions({ title: ['24 DAYS.', 'NO TRIAL.'], said: sentences(words) });
+  assert.deepEqual(opts.map((o) => o.text), ['24 days. No trial.', 'Does any of this decide anything?', 'A time to keep silence, a time to speak.']);
+  assert.equal(captionOptions({ title: ['KA-VOGUE'], said: [] }).length, 0); // one word is a name, not a caption
+  // Text on screen: emoji and stars dropped, each line its own sentence (a line's first capital is not a name).
+  const sw = screenWords(['*Nasaan?* 👀', 'Ghost project pala. 👻', 'Buwis ko']);
+  assert.deepEqual(sw.map((w) => w.text), ['Nasaan?', 'Ghost', 'project', 'pala.', 'Buwis', 'ko.']);
+  assert.deepEqual(hashtags(sw), []); // nothing repeated: no tags rather than noise
+  // The title sits under the chin when there is room, above the face when the face is low, mid-frame always.
+  assert.ok(Math.abs(coverCenter({ top: 0.2, chin: 0.5 }, 0.14) - 0.61) < 1e-9);
+  assert.ok(coverCenter({ top: 0.45, chin: 0.8 }, 0.14) < 0.45);
+  for (const f of [null, { top: 0.1, chin: 0.9 }, { top: 0.2, chin: 0.5 }]) { const c = coverCenter(f, 0.14); assert.ok(c >= 0.27 - 1e-9 && c <= 0.73 + 1e-9); }
+  // The sheet: reminders only when they apply.
+  const sheet = postSheet({ slug: 'talk', video: 'talk-final.mp4', duration: 37, frame: '1080x1920', cover: 'talk-cover.jpg', coverAt: 10.6, title: ['THEIR STALEMATE,', 'NOT YOURS'], titled: true,
+    said: sentences(words), words, standing: ['#pinoy'], tag: 'AI-generated', quiet: 'silent', checkLine: 'clean' });
+  assert.match(sheet, /Cover: {2}talk-cover\.jpg \(the frame at 00:10\.6, with the title on it\)/);
+  assert.match(sheet, /1\. Their stalemate, not yours/);
+  assert.match(sheet, /#pinoy #/);
+  assert.match(sheet, /AI-generated label/);
+  assert.match(sheet, /Add the sound in the app: the video's own track is silent/);
+  assert.match(sheet, /WHAT IS SAID/);
+  const plain = postSheet({ slug: 'clip', video: 'clip-final.mp4', cover: 'clip-cover.jpg', onScreen: ['Line one', 'Line two'], words: [] });
+  assert.ok(!/AI-generated label|Add the sound/.test(plain));
+  assert.match(plain, /WHAT IS ON SCREEN/);
+});

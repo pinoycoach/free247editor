@@ -14,11 +14,11 @@ editing or coding terms. Run every command from the repo root unless a step says
 | Path | What it is |
 | --- | --- |
 | `setup.mjs` | One-time setup. Safe to re-run. |
-| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `check`, `watch`, `status`, `clean`, `review`. |
+| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `post`, `check`, `watch`, `status`, `clean`, `review`. |
 | `tools/transcribe.mjs` | Free word-level transcription (Groq, or `--local` faster-whisper). |
 | `tools/review.mjs` | Opt-in draft review by Gemini (`node fable.mjs review <slug>`). |
 | `inbox/` | Raw videos the user wants edited. |
-| `outbox/` | Every draft and final, named `<slug>-v1.mp4`, `<slug>-final.mp4`, plus `<slug>-notes.md`. |
+| `outbox/` | Every draft and final, named `<slug>-v1.mp4`, `<slug>-final.mp4`, plus `<slug>-notes.md`; with a final, `<slug>-cover.jpg` and `<slug>-post.txt`. |
 | `my-style.md` | The user's style, written during style setup. |
 | `my-rules.md` | Lasting rules learned from the user's notes. |
 | `my-sounds/` | Music and sound effects the user supplies. |
@@ -266,6 +266,34 @@ growing, writing drafts and notes to `outbox/`. Errors land in `outbox/<name>-er
 Tell the user to keep that terminal open; closing it stops the watcher. When they come back
 with notes on a watched draft, continue from "Notes become rules" using the slug in the
 notes file.
+
+## The post package: a cover and a post sheet with every final
+
+Every `final` (and `caption --final`, `stitch --final`) also writes two files beside the video:
+
+- `<slug>-cover.jpg`: the sharpest frame with the face front-on, taken from footage that has no
+  captions on it, with the hook card's words as the title (second line in the accent color),
+  placed under the chin or above the face and inside the middle of the frame, because profile
+  grids crop a 9:16 cover to its center.
+- `<slug>-post.txt`: caption options (the title, the opening line, the closing line), hashtags,
+  a before-you-post list (upload the cover, the app's AI label when the video is tagged, add the
+  sound when the track is silent or quiet, the draft check's verdict), and everything that is
+  said or shown, for the description.
+
+Nothing in the sheet is invented: captions are lines from the video, and hashtags are only what
+the video keeps coming back to (a name, a word said twice, a pair like "flood control", the
+title), so a short clip may get one or two. That is your starting point, not the deliverable.
+Before you hand it over, write the caption the user will actually post, in their voice and the
+language they post in (Taglish when that is their page), from the options and the transcript,
+without adding claims the video does not make; put it at the top of the sheet under
+`SUGGESTED CAPTION` and add two or three topic tags the words alone could not give. Standing tags
+go in `my-rules.md` as `Hashtags: #one #two`.
+
+Look at the cover before you send it: a mid-word mouth or half-closed eyes are common. The notes
+list two other good frames; `node fable.mjs post <slug> --cover-at <seconds>` switches, and
+`--title "Line one / line two"` changes the words. `node fable.mjs post <slug>` makes the package
+again at any time (also for a draft), `post <file.mp4>` makes a cover and a bare sheet for any
+video, and `--no-post` skips it on a final. Never upload the cover or post anything yourself.
 
 ## The draft check: every render is checked before you show it
 

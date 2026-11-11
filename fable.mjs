@@ -13,6 +13,7 @@
 //       Written captions on a clip, each at its own time (emoji, title cards, accent words); nothing is
 //       transcribed or cut. The lines come from <video name>.captions.txt beside the video, or --lines.
 //   node fable.mjs watch [--every 5] [--once]       24/7: edit every new video that lands in inbox/
+//   node fable.mjs post <slug|video.mp4> [--cover-at 12.5] [--title "Line one / line two"]   cover image and post sheet; made with every final
 //   node fable.mjs check <slug|video.mp4>            the draft check on its own: sound, black frames, text against the app buttons and the face
 //   node fable.mjs status
 //   node fable.mjs clean [slug] [--apply] [--days 3] [--all]  what finished or idle projects can give back; deletes only with --apply
@@ -37,6 +38,7 @@ import { isOutput, orderClips, parseBrief, stitchFrame, wrapCaption } from './to
 import { captionCenter, parseCaptionScript } from './tools/caption-script.mjs';
 import { planMotion } from './tools/motion.mjs';
 import { cleanTargets, mb, projectKind } from './tools/clean.mjs';
+import { coverCenter, postSheet, screenWords, sentences } from './tools/post.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -60,7 +62,7 @@ const { values: opt, positionals } = parseArgs({
     engine: { type: 'string', default: 'fast' },
     script: { type: 'string' }, tag: { type: 'string' }, caption: { type: 'string' }, final: { type: 'boolean' },
     sub: { type: 'string', multiple: true }, lines: { type: 'string' },
-    apply: { type: 'boolean' }, 'no-check': { type: 'boolean' }, days: { type: 'string', default: '3' }, all: { type: 'boolean' },
+    apply: { type: 'boolean' }, 'no-check': { type: 'boolean' }, 'no-post': { type: 'boolean' }, 'cover-at': { type: 'string' }, title: { type: 'string' }, days: { type: 'string', default: '3' }, all: { type: 'boolean' },
     'dry-run': { type: 'boolean' }, model: { type: 'string' },
   },
 });
@@ -185,6 +187,8 @@ function readStyle(media = null) {
     for (const raw of text.split(/\r?\n/)) {
       const line = raw.toLowerCase();
       if (!line.trim() || line.startsWith('#') || !ruleApplies(raw, media)) continue;
+      // "Hashtags: #pinoy #fyp" are the standing tags for every post sheet; nothing else is read from that line.
+      if (/^\s*-?\s*hashtags?:/i.test(raw)) { style.hashtags = [...new Set([...(style.hashtags || []), ...(raw.match(/#[\p{L}\p{N}_]+/gu) || [])])]; continue; }
       const never = /\b(never|no|none|wala|huwag|don't|do not)\b/.test(line);
       if (/format|aspect|orientation/.test(line) || /\b(9:16|16:9)\b/.test(line)) {
         if (/both/.test(line)) style.format = 'both';
@@ -1063,6 +1067,101 @@ function checkCommand(target) {
   log(`saved: ${out}`);
 }
 
+// ---------- post package: the cover and the post sheet ----------
+// clean is a video without burned-in text to take the cover frame from (the cut footage, or the
+// source of a captioned clip, with range = the part that was used); without one the finished
+// video is used and no title is added, since its own text is already in the frame.
+function makePost({ slug, style, dir, video, clean = null, range = null, title = null, hookEnd = 0, words = [], onScreen = null, tag = null, check = null }) {
+  if (opt['no-post']) return null;
+  try {
+    const hasClean = Boolean(clean && existsSync(clean)), from = hasClean ? clean : video;
+    const info = probe(from), out = probe(video);
+    // Without a clean frame, the hook card's own seconds make the cover: the title is already drawn there.
+    const [a, b] = hasClean && range ? range : !hasClean && hookEnd >= 1.6 ? [0.3, hookEnd + 0.3] : [0, info.duration];
+    const { w: W, h: H } = out.height > out.width * 1.2 ? { w: 1080, h: 1920 } : out.width > out.height * 1.2 ? { w: 1920, h: 1080 } : stitchFrame(out.width, out.height);
+    const work = join(dir, 'assets');
+    mkdirSync(work, { recursive: true });
+    // The frame: --cover-at (seconds into the finished video), or the sharpest one with the face in it.
+    let at = null, face = null, alternates = [];
+    if (opt['cover-at'] !== undefined && Number.isFinite(Number(opt['cover-at']))) at = a + Number(opt['cover-at']);
+    else {
+      try {
+        const r = JSON.parse(run('python', [join(root, 'tools/pick_cover.py'), from, String(a), String(b)]));
+        at = r.pick.t; face = r.pick.face; alternates = r.alternates.map((x) => r3(x.t - a));
+      } catch (e) { log(`cover: taking a frame a third of the way in (${/No module named .cv2./.test(e.message) ? 'pip install opencv-python-headless to pick the sharpest one with a face' : e.message.split('\n').pop()})`); at = a + (b - a) / 3; }
+    }
+    at = Math.min(Math.max(a, at), Math.max(a, b - 0.1));
+    const frame = join(work, 'cover-frame.png'), coverTmp = join(work, 'cover.jpg');
+    ff(['-ss', String(r3(at)), '-i', from, '-frames:v', '1', '-vf', `scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H}`, '-update', '1', frame]);
+    // The title: --title, or the hook card's words, or the first line on screen. Second line in the accent color.
+    let lines = opt.title ? opt.title.split(/\s+\/\s+/).map((x) => x.trim()).filter(Boolean) : hasClean ? title : null;
+    // A title ends clean: "KA-VOGUE," was a caption leading into the next line; on a cover it stands alone.
+    if (lines?.length) lines = lines.map((l, i) => (i === lines.length - 1 ? l.replace(/[,;:]+(\*?)$/, '$1') : l));
+    if (onScreen) words = screenWords(onScreen);
+    let titled = false;
+    if (lines?.length) {
+      const drawn = lines.map((l, i) => (i === 1 && !l.includes('*') ? `*${l}*` : l));
+      const size = Math.round(H > W ? W * 0.105 : H * 0.1);
+      const center = coverCenter(face, (drawn.length * size * 1.25) / H);
+      writeFileSync(join(work, 'cover-cards.json'), JSON.stringify({ W, H, centerY: Math.round(center * H), maxW: Math.round(W * 0.86), size, color: style.color, accent: style.accent,
+        font: join(fontsDir, 'Montserrat-ExtraBold.ttf'), serif: null, cards: [{ out: 'assets/cover-title.png', lines: drawn, scale: 1 }] }));
+      try {
+        const [card] = JSON.parse(run('python', [join(root, 'tools/caption_cards.py'), 'assets/cover-cards.json'], { cwd: dir }));
+        ff(['-i', frame, '-i', join(dir, card.file), '-filter_complex', `[0:v][1:v]overlay=${card.x}:${card.y}`, '-frames:v', '1', '-update', '1', '-q:v', '2', coverTmp]);
+        titled = true;
+      } catch (e) { log(`cover: no title drawn (${/No module named .PIL./.test(e.message) ? 'pip install pillow' : e.message.split('\n').pop()})`); }
+    }
+    if (!titled) { ff(['-i', frame, '-frames:v', '1', '-update', '1', '-q:v', '2', coverTmp]); lines = null; }
+    const cover = deliver(`${slug}-cover.jpg`, style, (p) => copyFileSync(coverTmp, p));
+    for (const f of [frame, coverTmp, join(work, 'cover-cards.json'), join(work, 'cover-title.png')]) rmSync(f, { force: true });
+    const quiet = check?.findings?.some((f) => /sound track is silent|no sound track/.test(f.text)) ? 'silent' : check?.findings?.some((f) => /^quiet:/.test(f.text)) ? 'quiet' : null;
+    const sheet = postSheet({ slug, video: basename(video), duration: out.duration, frame: `${W}x${H}`, cover: basename(cover), coverAt: r3(at - a), title: lines || title, titled: Boolean(lines),
+      said: onScreen ? [] : sentences(words), onScreen, words, standing: style.hashtags || [], tag, quiet, checkLine: check?.verdict?.line || null });
+    const post = deliver(`${slug}-post.txt`, style, (p) => writeFileSync(p, sheet));
+    for (const f of [cover, post]) { const m = mirror(f, style); if (m) log(`copied to ${m}`); }
+    log(`post package: ${cover} (frame at ${fmt(at - a)}${lines ? ', titled' : ''}) and ${basename(post)}`);
+    return { cover, post, at: r3(at - a), alternates, lines: [
+      `- Post package: ${basename(cover)} (the frame at ${fmt(at - a)}${lines ? `, titled "${lines.join(' / ').replace(/\*/g, '')}"` : hasClean ? ', no title: pass --title "Line one / line two"' : ', taken from the finished video'}) and ${basename(post)} (caption options from the words in the video, hashtags, a before-you-post list).${alternates.length ? ` Other good frames: ${alternates.map((x) => fmt(x)).join(', ')}; switch with \`node fable.mjs post ${slug} --cover-at <seconds>\`.` : ''}`, ''] };
+  } catch (e) { log(`post package skipped: ${e.message.split('\n')[0]}`); return null; }
+}
+// `post <slug>` makes the package again for a project's newest final (or draft); `post <file.mp4>`
+// makes a cover and a bare sheet for any video.
+function postCommand(target) {
+  const style = readStyle();
+  const file = existsSync(resolve(target)) && statSync(resolve(target)).isFile() ? resolve(target) : null;
+  const slug = opt.slug || (file ? parse(file).name.replace(/[-_](final|v\d+)$/i, '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') : target);
+  const dir = join(projects, slug);
+  let video = file;
+  if (!video) {
+    const re = new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}-(final|v\\d+)\\.mp4$`);
+    const found = outboxes(style).flatMap((d) => readdirSync(d).filter((f) => re.test(f)).map((f) => join(d, f))).map((f) => ({ f, t: statSync(f).mtimeMs, final: /-final\.mp4$/.test(f) })).sort((x, y) => y.final - x.final || y.t - x.t)[0];
+    if (!found) die(`no final or draft of "${slug}" in the outbox, and no file at ${resolve(target)}`);
+    video = found.f;
+  }
+  const read = (f) => { try { return JSON.parse(readFileSync(join(dir, f), 'utf8')); } catch { return null; } };
+  const plan = read('assets/plan.json'), cap = read('caption.json'), st = read('stitch.json');
+  const wordsOf = (texts) => texts.flatMap((t) => t.replace(/\*/g, '').split(/\s+/)).filter(Boolean).map((text) => ({ text }));
+  let args = { clean: null, title: null, words: [], onScreen: null, tag: null, check: null };
+  // A clean frame for the cover: the cut footage; or, when it was cleaned away, the working copy or
+  // the original itself, inside the longest piece that was kept (its times are source times).
+  const cleanSource = () => {
+    if (existsSync(join(dir, 'assets/footage.mp4'))) return { clean: join(dir, 'assets/footage.mp4') };
+    const doc = read('edit.json'), from = [join(dir, 'assets/raw.mp4'), doc?.source?.file].find((f) => f && existsSync(f));
+    const longest = (doc?.segments || []).slice().sort((x, y) => (y.src1 - y.src0) - (x.src1 - x.src0))[0];
+    return from && longest ? { clean: from, range: [longest.src0, longest.src1] } : { clean: null };
+  };
+  if (plan && !file) args = { ...cleanSource(), title: plan.hook?.lines || null, hookEnd: plan.hook?.end || 0, words: plan.words || [], onScreen: null, tag: plan.tag || null, check: plan.check ? { verdict: plan.check, findings: plan.check.findings || [] } : null };
+  else if (cap && !file) {
+    const texts = cap.captions.map((c) => c.lines.join(' ').replace(/\*/g, ''));
+    const first = cap.captions.find((c) => c.tags.includes('title')) || cap.captions[0];
+    args = { clean: cap.source, range: [cap.trim?.start || 0, (cap.trim?.start || 0) + cap.duration], title: first.lines, words: wordsOf(texts), onScreen: texts, tag: cap.tag || null, check: cap.check ? { verdict: cap.check, findings: cap.check.findings || [] } : null };
+  } else if (st && !file) args = { clean: null, title: null, words: wordsOf(st.caption ? [st.caption] : []), onScreen: st.caption ? [st.caption] : null, tag: st.tag || null, check: st.check ? { verdict: st.check, findings: st.check.findings || [] } : null };
+  opt['no-post'] = false;
+  const made = makePost({ slug, style, dir: existsSync(dir) ? dir : join(root, '.fable', 'post'), video, ...args });
+  if (!made) die('the post package could not be made');
+  console.log('\n' + readFileSync(made.post, 'utf8'));
+}
+
 // ---------- the pipeline ----------
 // Counts versions in every outbox folder, so a v3 never overwrites a v1 kept on Drive.
 function nextVersion(slug, suffix, style) {
@@ -1120,7 +1219,7 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   const savePlan = () => writeFileSync(join(dir, 'assets/plan.json'), JSON.stringify({ ...plan, style }, null, 2));
   savePlan();
   const outputs = [], renders = [];
-  let checkNotes = null;
+  let checkNotes = null, post = null;
   for (const fmt of formats) {
     const lay = layoutFor(fmt, src);
     plan.broll = prepareBroll(dir, broll, lay);
@@ -1174,12 +1273,14 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
       plan.boxes = plan.handEdited?.includes(file) && useBrowser ? null : textBoxes(plan, lay, style);
       const c = draftCheck(rendered, { boxes: plan.boxes, work: join(dir, 'assets') });
       if (c) { plan.check = { ...c.verdict, findings: c.findings }; checkNotes = c.lines; }
+      // A final goes out with its cover and post sheet. The cover frame comes from the cut footage, which has no text on it.
+      if (finalName) post = makePost({ slug: edit.slug, style, dir, video: rendered, clean: join(dir, 'assets/footage.mp4'), title: hook?.lines || null, hookEnd, words: tl.words, tag, check: c });
     }
   }
   plan.renders = renders;
   savePlan();
   cleanup(dir);
-  return { plan, style, outputs, mixInfo, broll, renders, checkNotes };
+  return { plan, style, outputs, mixInfo, broll, renders, checkNotes, post };
 }
 
 function notes(dir, edit, result, suggestions) {
@@ -1201,6 +1302,7 @@ function notes(dir, edit, result, suggestions) {
       ? `- Motion (graphics: ${plan.motion.byHand ? 'set by hand in edit.json' : style.graphics}): ${plan.motion.zooms.length} punch-in${plan.motion.zooms.length === 1 ? '' : 's'}${plan.motion.zooms.length ? ` (${plan.motion.zooms.map((z) => `${fmt(z.start)} "${z.on || ''}"`).join(', ')})` : ''}${plan.motion.cards.length ? `; cards: ${plan.motion.cards.map((c) => `"${c.text}" at ${fmt(c.start)}`).join(', ')}` : ''}. ${result.renders?.[0]?.engine?.startsWith('browser') ? 'The browser renderer does not draw these; it has its own push-in.' : 'Drop one by copying "motion" from assets/plan.json into edit.json and deleting it; "motion": false turns all of it off.'}`
       : style.graphics === 'minimal' ? '- Motion: none (graphics: minimal in your style).' : null,
     plan.tag ? `- Tag "${plan.tag}" on every frame, top right (house rule for AI-made footage).` : null,
+    result.post ? result.post.lines[0] : null,
     result.renders?.length ? `- Rendered with ${result.renders.map((r) => r.engine + (r.seconds ? ` in ${r.seconds} s` : '')).join(' and ')}.` : null,
     plan.memory?.hogs?.length ? `- Memory was tight (${plan.memory.free} GB free): ${plan.memory.hogs.slice(0, 3).join(', ')}. Fable used the light encoder path.` : null,
     `- Privacy: ${plan.network?.length ? plan.network.join('; ') + '. Everything else stayed on this computer.' : 'nothing left this computer.'}${style.privacy === 'local' ? ' (local-only mode)' : ''}`,
@@ -1457,8 +1559,9 @@ function stitch(folder) {
   if (lines.length) { const bh = lines.length * size + (lines.length - 1) * Math.round(size * 0.22), top = Math.min(H * 0.6 - bh / 2, H * 0.85 - bh), bw = Math.min(W * 0.92, longest * size * 0.64); boxes.push({ kind: 'caption', text: lines.join(' '), start: 0, end: total, x0: Math.round((W - bw) / 2), x1: Math.round((W + bw) / 2), y0: Math.round(top), y1: Math.round(top + bh) }); }
   const check = draftCheck(rendered, { boxes, work: join(dir, 'assets') });
   const out = deliver(outName, style, (p) => copyFileSync(rendered, p));
+  const post = final ? makePost({ slug, style, dir, video: rendered, title: null, words: (caption || '').split(/\s+/).filter(Boolean).map((text) => ({ text })), onScreen: caption ? [caption] : null, tag, check }) : null;
   rmSync(rendered, { force: true }); // one copy only: the laptop is short on disk
-  writeFileSync(join(dir, 'stitch.json'), JSON.stringify({ slug, source: src, brief: briefFile || null, order: order.map((c) => c.name), by, caption: caption || null, subs, tag, frame: `${W}x${H}`, fps, duration: r3(total), boxes }, null, 2) + '\n');
+  writeFileSync(join(dir, 'stitch.json'), JSON.stringify({ slug, source: src, brief: briefFile || null, order: order.map((c) => c.name), by, caption: caption || null, subs, tag, frame: `${W}x${H}`, fps, duration: r3(total), boxes, check: check ? { ...check.verdict, findings: check.findings } : null }, null, 2) + '\n');
   const notesPath = deliver(`${slug}-notes.md`, style, (p) => writeFileSync(p, [
     `# ${slug}`, '',
     `${final ? 'Final' : 'Draft'}: ${basename(out)} (${W}x${H}, ${r3(total)} s, H.264/AAC)`,
@@ -1472,6 +1575,7 @@ function stitch(folder) {
     ...subs.map((s) => `- Subtitle under the caption, ${s.start}-${s.end} s: "${s.text}".`),
     tag ? `- House rule: "${tag}" tag top right on every frame.` : '- No AI tag (nothing says the clips are AI-made; add --tag AI-generated if they are).',
     '- Nothing left the computer: no transcription, no uploads.', '',
+    ...(post ? post.lines : []),
     ...(check ? check.lines : []),
     '## Check', '',
     `- fable/video-projects/${slug}/assets/review-shots.png: one frame per clip, for order and caption placement.`,
@@ -1576,9 +1680,12 @@ function captionVideo(target) {
   const boxes = placed.map((p, j) => { const c = script.captions[j]; return { kind: c ? 'caption' : 'tag', text: c ? c.lines.join(' ') : tag, start: c ? c.start : 0, end: c ? c.end : duration, x0: p.x + 12, y0: p.y + 12, x1: p.x + p.w - 12, y1: p.y + p.h - 12 - Math.round(p.size * 0.25) }; });
   const check = draftCheck(rendered, { boxes, work: join(dir, 'assets') });
   const out = deliver(outName, style, (p) => copyFileSync(rendered, p));
+  const shown = script.captions.map((c) => c.lines.join(' ').replace(/\*/g, ''));
+  const post = final ? makePost({ slug, style, dir, video: rendered, clean: source, range: [start, start + duration], title: (script.captions.find((c) => c.tags.includes('title')) || script.captions[0]).lines,
+    words: shown.flatMap((t) => t.split(/\s+/)).filter(Boolean).map((text) => ({ text })), onScreen: shown, tag, check }) : null;
   rmSync(rendered, { force: true }); // one copy only: the laptop is short on disk
   rmSync(join(dir, 'assets/caption.filter'), { force: true });
-  writeFileSync(join(dir, 'caption.json'), JSON.stringify({ slug, source, lines: 'captions.txt', trim: script.trim, position: script.position, center: r3(center), tag, frame: `${W}x${H}`, duration, captions: script.captions, boxes }, null, 2) + '\n');
+  writeFileSync(join(dir, 'caption.json'), JSON.stringify({ slug, source, lines: 'captions.txt', trim: script.trim, position: script.position, center: r3(center), tag, frame: `${W}x${H}`, duration, captions: script.captions, boxes, check: check ? { ...check.verdict, findings: check.findings } : null }, null, 2) + '\n');
   const notesPath = deliver(`${slug}-notes.md`, style, (p) => writeFileSync(p, [
     `# ${slug}`, '',
     `${final ? 'Final' : 'Draft'}: ${basename(out)} (${W}x${H}, ${duration} s, H.264/AAC, rendered in ${took} s)`,
@@ -1593,6 +1700,7 @@ function captionVideo(target) {
     tag ? `- House rule: "${tag}" tag top right on every frame.` : '- No AI tag added (pass --tag AI-generated, or a "tag:" line, if the footage is AI-made and does not already show one).',
     '- Nothing left the computer.', '',
     ...(script.warnings.length ? ['## Look at these', '', ...script.warnings.map((w) => `- ${w}`), ''] : []),
+    ...(post ? post.lines : []),
     ...(check ? check.lines : []),
     '## Check', '',
     `- fable/video-projects/${slug}/assets/review-shots.png: one frame per caption, to check each line against its shot.`,
@@ -1726,6 +1834,7 @@ if (isMain) {
     case 'caption': if (!target) die('usage: node fable.mjs caption <video|slug> [--lines captions.txt]'); captionVideo(target); break;
     case 'watch': watch(); break;
     case 'status': status(); break;
+    case 'post': if (!target) die('usage: node fable.mjs post <slug|video.mp4>'); postCommand(target); break;
     case 'check': if (!target) die('usage: node fable.mjs check <slug|video.mp4>'); checkCommand(target); break;
     case 'clean': cleanDisk(); break;
     case 'review': {
@@ -1736,7 +1845,7 @@ if (isMain) {
       break;
     }
     default:
-      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 20).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 21).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(command ? 1 : 0);
   }
 }

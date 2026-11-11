@@ -100,6 +100,7 @@ YouTube and it gets its own framing and text placement.
 | Learning | Your notes are saved as rules in `my-rules.md` and applied every time; a rule can be scoped with `[9:16]`, `[16:9]`, `[<90s]`, or `[>90s]` |
 | Share | A `Copy to: <folder>` rule mirrors every draft, final, and notes file to a synced Drive folder or shared drive |
 | Motion | With "Graphics: some" (or heavy) in your style, drafts get punch-in zooms on the lines that carry weight, number callouts ("24 DAYS") and step labels for counted lists, all planned from your own words and drawn by FFmpeg in seconds |
+| Long recordings | `node fable.mjs clips <live or podcast>` transcribes a recording of any length in pieces and lists the stretches that stand on their own as shorts, each with why it was picked; `--cut 1,3 --edit` cuts those out and edits them |
 | Rules you can check | Style and rules are read by label ("Pace: tight", "Caption position: lower third"), whole words only; `node fable.mjs rules` shows what every line was read as and which lines the autopilot does not use |
 | Beat | `node fable.mjs beats <song>` finds the tempo and the beats on your own computer; a captions file with `beat:` and `keep:` cuts a clip down so every cut and caption lands on the beat of the song you will add in the app |
 | Post package | Every final comes with a cover image (the sharpest frame with your face in it, your hook as the title) and a post sheet: caption options from your own words, hashtags from what the video keeps coming back to, and a before-you-post list |

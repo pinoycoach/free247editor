@@ -14,7 +14,7 @@ editing or coding terms. Run every command from the repo root unless a step says
 | Path | What it is |
 | --- | --- |
 | `setup.mjs` | One-time setup. Safe to re-run. |
-| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `beats`, `post`, `check`, `watch`, `status`, `rules`, `clean`, `review`. |
+| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `clips`, `beats`, `post`, `check`, `watch`, `status`, `rules`, `clean`, `review`. |
 | `tools/transcribe.mjs` | Free word-level transcription (Groq, or `--local` faster-whisper). |
 | `tools/review.mjs` | Opt-in draft review by Gemini (`node fable.mjs review <slug>`). |
 | `inbox/` | Raw videos the user wants edited. |
@@ -215,6 +215,33 @@ frame per caption) and fix what covers a face or a hand. To change a line, edit
 `fable/video-projects/<slug>/captions.txt` and run `node fable.mjs caption <slug>`; on approval
 add `--final`. Time each line to what the body or the shot is doing; that is where the joke lands.
 Needs Python with Pillow (`pip install pillow`).
+
+## Long recordings: a live, a podcast, "find the clips", "make reels from this"
+
+Do not run `edit` on a long recording: it would copy the whole thing and make one long video.
+Run `node fable.mjs clips "<recording>"` instead. It reads only the sound, transcribes it (in
+20-minute pieces when it is long, each split in a pause; a run that hits Groq's free limit keeps
+what is done and continues when you run it again), and lists the stretches that would stand on
+their own as shorts: `outbox/<slug>-clips.md`, with each clip's time, opening and closing line,
+why it was picked, and its full text. Nothing is cut yet. `--count 10 --min 15 --max 90` changes
+how many and how long (default: 6 clips of 20 to 75 seconds).
+
+The list is a first pass by rule, not a verdict: a clip opens on a line that needs no context
+(a question, a claim, a number; never "And so..." or the greeting), stays on one subject, and
+ends on a finished thought before a pause. Read it as an editor. Check each ending for a cut-off
+punchline and each opening for a missing setup, look for a strong stretch it missed, and fix the
+times or add your own entry in `fable/video-projects/<slug>/clips.json` (seconds in the
+recording). Tell the user which ones you would post and why, in their language.
+
+Then `node fable.mjs clips <slug> --cut 1,3` (or `--cut all`) cuts the chosen ones out into
+`inbox/` as ordinary videos, and `--edit` edits each one right away: cuts, captions, motion,
+draft check, exactly like any short. Keep the recording where it is until the clips are final;
+the clips in `inbox/` are the originals their projects rebuild from.
+
+Any transcript now recovers its own punctuation: when the model stops ending sentences (it
+happens after long pauses, and then runs on to the end of the file), that stretch is transcribed
+again in two-minute pieces and the better result is kept. Hooks, motion and clips all depend on
+sentence ends, so if notes or captions read as one endless sentence, transcribe again.
 
 ## Music and the beat: a dance clip, a montage, "cut it to the song", "make it 15 seconds"
 

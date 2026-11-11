@@ -503,3 +503,66 @@ test('style reader: a line is read by its label, as whole words, and the first c
   assert.match(lines, /Not used by the autopilot/);
   assert.match(lines, /pace = tight/);
 });
+
+test('long recordings: sound split in pauses, pieces joined on one clock, punctuation laid back on', async () => {
+  const { chunkPlan, mergeChunks, restorePunctuation } = await import('../tools/long.mjs');
+  // Short enough: one piece. Longer: each at most maxLen, cut in the longest pause near the end of each.
+  assert.deepEqual(chunkPlan(900, [], 1200), [{ start: 0, end: 900 }]);
+  const silences = [{ start: 1000, end: 1000.3 }, { start: 1100, end: 1102 }, { start: 1190, end: 1190.4 }, { start: 2250, end: 2251 }];
+  const plan = chunkPlan(3000, silences, 1200);
+  assert.deepEqual(plan.map((c) => c.start), [0, 1101, 2250.5]);
+  assert.equal(plan.at(-1).end, 3000);
+  assert.ok(plan.every((c, i) => c.end - c.start <= 1200 && (i === 0 || c.start === plan[i - 1].end)));
+  // No pause to cut in: a hard cut at the limit, still covering everything.
+  assert.deepEqual(chunkPlan(2500, [], 1200).map((c) => [c.start, c.end]), [[0, 1200], [1200, 2400], [2400, 2500]]);
+  // Words come back on each piece's own clock; joined, they are on the recording's.
+  const merged = mergeChunks([{ start: 0, end: 10 }, { start: 10, end: 20 }], [[W('one', 1, 1.4), W('two', 9.5, 9.9)], [W('two', -0.4, 0), W('three', 0.5, 0.9), W('four', 5, 5.5)]]);
+  assert.deepEqual(merged.map((w) => [w.text, w.start]), [['one', 1], ['two', 9.5], ['three', 10.5], ['four', 15]]);
+  // Bare timed words take the full text's punctuation and capitals, across a small mismatch.
+  const bare = [W('it', 0, 0.2), W('came', 0.3, 0.6), W("that's", 1, 1.3), W('the', 1.4, 1.5), W('whole', 1.6, 1.9), W('method', 2, 2.5), W('where', 3.2, 3.5), W('was', 3.6, 3.8), W('i', 3.9, 4), W('off', 4.1, 4.4)];
+  const fixed = restorePunctuation(bare, "It came. That's the whole method. Uh, where was I off?");
+  assert.deepEqual(fixed.map((w) => w.text), ['It', 'came.', "That's", 'the', 'whole', 'method.', 'where', 'was', 'I', 'off?']);
+  assert.deepEqual(fixed.map((w) => w.start), bare.map((w) => w.start));
+  assert.deepEqual(restorePunctuation(bare, '').map((w) => w.text), bare.map((w) => w.text));
+});
+
+test('clips: stretches of a long talk that stand on their own', async () => {
+  const { findClips, clipName } = await import('../tools/long.mjs');
+  // A talk: greeting, a self-contained story, a second subject, a sign-off. Sentences are a few
+  // words a second, with a longer pause where the subject changes.
+  let t = 0;
+  const words = [];
+  const say = (text, pauseAfter = 0.3) => { for (const w of text.split(' ')) { words.push(W(w, Math.round(t * 100) / 100, Math.round((t + 0.3) * 100) / 100)); t += 0.4; } t += pauseAfter; };
+  say('Hello hello, can you hear me?'); say('Say hi in the comments.', 1.5);
+  const story = ['Why does the old calendar run in sixty days?', 'Think of ten riders and twelve horses.', 'Every ten days you saddle ten horses.', 'Then you run out of riders.', 'Two horses stand in the stable with empty saddles.',
+    'Those two horses are called the void.', 'The riders change, the horses wait.', 'Every stable has two horses nobody rides.', 'That is the whole trick of the calendar.', 'Two empty saddles.'];
+  const storyStart = t;
+  story.forEach((s, i) => say(s, i === story.length - 1 ? 1.6 : 0.3));
+  const storyEnd = t - 1.6;
+  const budget = ['Now the budget.', 'The senate moved seven trillion pesos in one week.', 'And nobody asked where the flood money went.', 'The budget is the way out for everyone in that room.', 'Seven trillion pesos buys a lot of silence.',
+    'So the trial waits and the budget moves.', 'That is how a budget becomes a hiding place.', 'Watch the budget, not the speeches.'];
+  budget.forEach((s, i) => say(s, i === budget.length - 1 ? 1.5 : 0.3));
+  say('Thanks for watching, see you next week.');
+  const clips = findClips(words, { count: 3, min: 15, max: 45 });
+  assert.ok(clips.length >= 2);
+  // The best clip is the story, whole: it opens on its question, not on the greeting, and ends on its last line.
+  const best = clips[0];
+  assert.equal(best.opening, 'Why does the old calendar run in sixty days?');
+  assert.equal(best.closing, 'Two empty saddles.');
+  assert.ok(Math.abs(best.start - storyStart) < 0.01 && Math.abs(best.end - storyEnd) < 0.5);
+  assert.ok(best.topic.includes('horses'));
+  assert.match(best.why.join('; '), /question/);
+  assert.match(clipName(best), /horses/);
+  // No clip opens or closes on talk about the stream itself, opens on "And..." or "Now the budget.", or overlaps another.
+  for (const c of clips) {
+    assert.ok(!/hello|comments|thanks for watching/i.test(c.opening + c.closing), c.opening);
+    assert.ok(!/^(and|so|then)\b/i.test(c.opening), c.opening);
+    assert.ok(c.duration >= 15 && c.duration <= 45);
+  }
+  const sorted = [...clips].sort((a, b) => a.start - b.start);
+  for (let i = 1; i < sorted.length; i++) assert.ok(sorted[i].start >= sorted[i - 1].end);
+  // A transcript with no punctuation at all still yields clips: pauses stand in for sentence ends.
+  const bare = words.map((w) => ({ ...w, text: w.text.replace(/[.,!?]/g, '') }));
+  assert.ok(findClips(bare, { count: 3, min: 15, max: 60 }).length >= 1);
+  assert.deepEqual(findClips([], {}), []);
+});

@@ -13,6 +13,8 @@
 //       Written captions on a clip, each at its own time (emoji, title cards, accent words); nothing is
 //       transcribed or cut. The lines come from <video name>.captions.txt beside the video, or --lines.
 //   node fable.mjs watch [--every 5] [--once]       24/7: edit every new video that lands in inbox/
+//   node fable.mjs clips <long video|slug> [--count 6] [--min 20] [--max 75]   a live or a podcast: the stretches that stand on their own as shorts
+//   node fable.mjs clips <slug> --cut 1,3 [--edit]   cut those out into inbox/ (and edit each one)
 //   node fable.mjs beats <song or video>             the tempo and where the beats fall (for cutting and captioning to music)
 //   node fable.mjs post <slug|video.mp4> [--cover-at 12.5] [--title "Line one / line two"]   cover image and post sheet; made with every final
 //   node fable.mjs check <slug|video.mp4>            the draft check on its own: sound, black frames, text against the app buttons and the face
@@ -43,6 +45,7 @@ import { cleanTargets, mb, projectKind } from './tools/clean.mjs';
 import { coverCenter, postSheet, screenWords, sentences } from './tools/post.mjs';
 import { detectBeats, gridFromBpm, snapPieces, snapToBeat } from './tools/beats.mjs';
 import { parseStyle, ruleApplies, rulesReport } from './tools/style.mjs';
+import { clipName, findClips } from './tools/long.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -66,7 +69,7 @@ const { values: opt, positionals } = parseArgs({
     engine: { type: 'string', default: 'fast' },
     script: { type: 'string' }, tag: { type: 'string' }, caption: { type: 'string' }, final: { type: 'boolean' },
     sub: { type: 'string', multiple: true }, lines: { type: 'string' },
-    apply: { type: 'boolean' }, 'no-check': { type: 'boolean' }, 'no-post': { type: 'boolean' }, 'cover-at': { type: 'string' }, title: { type: 'string' }, days: { type: 'string', default: '3' }, all: { type: 'boolean' },
+    apply: { type: 'boolean' }, count: { type: 'string' }, min: { type: 'string' }, max: { type: 'string' }, cut: { type: 'string' }, edit: { type: 'boolean' }, chunk: { type: 'string' }, 'no-check': { type: 'boolean' }, 'no-post': { type: 'boolean' }, 'cover-at': { type: 'string' }, title: { type: 'string' }, days: { type: 'string', default: '3' }, all: { type: 'boolean' },
     'dry-run': { type: 'boolean' }, model: { type: 'string' },
   },
 });
@@ -1674,6 +1677,93 @@ function captionVideo(target) {
   return { slug, out, notes: notesPath, captions: script.captions, warnings: script.warnings };
 }
 
+// ---------- clips: the shorts inside a long recording ----------
+// A live or a podcast is never normalized or copied whole: only its sound is read (for the words),
+// candidates are chosen from the transcript, and just the stretches that were picked are cut out,
+// into inbox/, where each one is an ordinary short for `edit`.
+const stamp = (t) => `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+async function clipsCommand(target) {
+  const prevPath = join(projects, target, 'clips.json');
+  const prev = !existsSync(resolve(target)) && existsSync(prevPath) ? JSON.parse(readFileSync(prevPath, 'utf8')) : null;
+  const source = prev ? prev.source : resolve(target);
+  if (!existsSync(source)) die(prev ? `the recording for ${target} is gone: ${source}` : `not found: ${source}`);
+  const slug = opt.slug || prev?.slug || parse(source).name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'recording';
+  const dir = join(projects, slug), clipsPath = join(dir, 'clips.json');
+  mkdirSync(join(dir, 'assets'), { recursive: true });
+  const style = readStyle();
+  const info = probe(source);
+  if (!info.hasAudio) die(`${basename(source)} has no sound, so there are no words to choose clips from`);
+
+  // The words. Only a small sound-only copy is made, and it is removed once the transcript exists.
+  const transcriptPath = join(dir, 'assets/audio.json');
+  if (!existsSync(transcriptPath)) {
+    const audio = join(dir, 'assets/audio.m4a');
+    log(`reading the sound of ${basename(source)} (${(info.duration / 60).toFixed(1)} min)`);
+    ff(['-i', source, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'aac', '-b:a', '48k', audio]);
+    try { process.loadEnvFile(join(root, '.env')); } catch {}
+    const names = knownNames(), base = [join(root, 'tools/transcribe.mjs'), audio, ...(names.length ? ['--prompt', names.join(', ')] : []), ...(opt.chunk ? ['--chunk', opt.chunk] : [])];
+    const tries = process.env.GROQ_API_KEY && style.privacy !== 'local' ? [[], ['--local']] : [['--local']];
+    let done = false, last = '';
+    for (const extra of tries) {
+      log(`transcribing ${extra.length ? 'on this computer' : 'with Groq'}${info.duration > 1200 ? ' in pieces (a long recording takes a few minutes)' : ''}`);
+      try { run('node', [...base, ...extra]); done = true; break; } catch (e) { last = e.message; log(`that did not work: ${e.message.split('\n').filter(Boolean).pop()}`); }
+    }
+    if (!done) die(`no transcript, so no clips. ${last.split('\n').filter(Boolean).pop() || ''} Pieces already transcribed are kept; run this again to continue.`);
+    rmSync(audio, { force: true });
+  }
+  const words = (JSON.parse(readFileSync(transcriptPath, 'utf8')).words || []).filter((w) => w.text && w.end >= w.start).sort((a, b) => a.start - b.start);
+  if (!words.length) die('the transcript has no words');
+
+  if (opt.cut === undefined) {
+    const options = { count: Number(opt.count) || prev?.options?.count || 6, min: Number(opt.min) || prev?.options?.min || 20, max: Number(opt.max) || prev?.options?.max || 75 };
+    const found = findClips(words, options).sort((a, b) => a.start - b.start).map((c, i) => ({ n: i + 1, name: clipName(c), ...c }));
+    if (!found.length) die(`no stretch of ${options.min}-${options.max} s stands on its own in this recording. Try a wider range: --min 15 --max 120`);
+    writeFileSync(clipsPath, JSON.stringify({ slug, source, duration: info.duration, options, _help: 'Each clip is cut from start to end (seconds in the recording). Move an edge, rename, delete one, or add your own { "n": 9, "name": "my-clip", "start": 100, "end": 140 }, then: node fable.mjs clips ' + slug + ' --cut 1,3', clips: found }, null, 2) + '\n');
+    const by = [...found].sort((a, b) => b.score - a.score);
+    const sheet = [
+      `# ${slug}: ${found.length} clips in ${(info.duration / 60).toFixed(1)} minutes`, '',
+      `Recording: ${source}`,
+      `Chosen from the transcript (${words.length} words): stretches of ${options.min}-${options.max} s that open on a line needing no context, stay on one subject, and end on a finished thought. Nothing is cut yet.`,
+      `Strongest first: ${by.map((c) => c.n).join(', ')}.`, '',
+      ...found.flatMap((c) => [
+        `## ${c.n}. ${stamp(c.start)}-${stamp(c.end)} (${Math.round(c.duration)} s): ${c.topic.join(', ') || c.name}`, '',
+        `- Opens: "${c.opening}"`, `- Closes: "${c.closing}"`, `- Why: ${c.why.join('; ') || 'the best stretch left'}.`, '',
+        c.text, '',
+      ]),
+      '## Next', '',
+      `- Cut the ones you want: \`node fable.mjs clips ${slug} --cut 1,3\` (or \`--cut all\`). Each lands in inbox/ as its own video; add \`--edit\` to edit them straight away.`,
+      `- Move an edge or add your own clip first: edit fable/video-projects/${slug}/clips.json (start and end are seconds in the recording).`,
+      `- More, shorter or longer: \`node fable.mjs clips ${slug} --count 10 --min 15 --max 90\`.`, '',
+    ].join('\n');
+    const out = deliver(`${slug}-clips.md`, style, (p) => writeFileSync(p, sheet));
+    mirror(out, style);
+    for (const c of found) console.log(`${String(c.n).padStart(2)}. ${stamp(c.start)}-${stamp(c.end)} ${String(Math.round(c.duration)).padStart(3)} s  "${c.opening.slice(0, 70)}"`);
+    log(`strongest first: ${by.map((c) => c.n).join(', ')}`);
+    log(`list: ${out}`);
+    log(`cut the ones you want: node fable.mjs clips ${slug} --cut 1,3`);
+    return;
+  }
+
+  // Cut the chosen ones out of the recording, exactly, into inbox/.
+  if (!prev?.clips?.length) die(`no clip list for ${slug} yet. First: node fable.mjs clips "${source}"`);
+  const want = /^all$/i.test(opt.cut) ? prev.clips.map((c) => c.n) : opt.cut.split(/[\s,]+/).filter(Boolean).map(Number);
+  const chosen = want.map((n) => prev.clips.find((c) => c.n === n) || die(`there is no clip ${n} in fable/video-projects/${slug}/clips.json (it has ${prev.clips.map((c) => c.n).join(', ')})`));
+  mkdirSync(inbox, { recursive: true });
+  diskCheck();
+  const made = [];
+  for (const c of chosen) {
+    // A breath of room on each side: the edit trims dead air itself, and never starts inside a word.
+    const a = Math.max(0, c.start - 0.25), b = Math.min(info.duration, c.end + 0.4);
+    if (!(b - a >= 1)) die(`clip ${c.n}: start ${c.start} and end ${c.end} do not make a clip`);
+    const file = join(inbox, `${slug}-clip-${String(c.n).padStart(2, '0')}-${String(c.name || 'clip').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'clip'}.mp4`);
+    ff(['-ss', String(r3(a)), '-i', source, '-t', String(r3(b - a)), '-map', '0:v:0', '-map', '0:a:0', '-c:v', 'libx264', '-preset', 'fast', '-crf', '18', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', file]);
+    log(`clip ${c.n}: ${stamp(c.start)}-${stamp(c.end)} -> inbox/${basename(file)}`);
+    made.push(file);
+  }
+  if (!opt.edit) return log(`${made.length} clip${made.length > 1 ? 's' : ''} in inbox/. Edit one with: node fable.mjs edit "inbox/${basename(made[0])}" (or add --edit to do them all now)`);
+  for (const file of made) await edit(file);
+}
+
 function watch() {
   mkdirSync(inbox, { recursive: true });
   const stateDir = join(root, '.fable'), statePath = join(stateDir, 'watch.json');
@@ -1796,6 +1886,7 @@ if (isMain) {
     case 'watch': watch(); break;
     case 'status': status(); break;
     case 'rules': console.log(rulesReport(loadStyle()).join('\n')); break;
+    case 'clips': if (!target) die('usage: node fable.mjs clips <long video|slug> [--cut 1,3]'); await clipsCommand(target); break;
     case 'beats': {
       if (!target) die('usage: node fable.mjs beats <song or video>');
       try {
@@ -1817,7 +1908,7 @@ if (isMain) {
       break;
     }
     default:
-      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 23).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 25).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(command ? 1 : 0);
   }
 }

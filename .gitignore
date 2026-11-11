@@ -18,6 +18,7 @@ my-sounds/*
 my-style.md
 my-rules.md
 *.transcribe.mp3
+*.transcribe.part*.json
 
 # Sync tools
 *.sync-conflict-*

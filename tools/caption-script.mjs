@@ -9,6 +9,7 @@
 //   trim: 5-20.6               (use only this part of the source; caption times count from its start)
 //   tag: AI-generated          (house rule for generated footage)
 //   audio: mute                (default: keep the clip's own sound)
+//   zoom: slow                 (a very slow push-in over the whole clip, for a static single take)
 //
 //   0.0-1.3  [title] KA-VOGUE,
 //   1.3      ang laki ng next / water bill mo.      (no end time: it holds until the next line)
@@ -23,7 +24,7 @@ const r3 = (n) => Math.round(n * 1000) / 1000;
 // 12.5, 0:12.5, 1:02 -> seconds
 const TIME = String.raw`(?:\d+:)?\d+(?:\.\d+)?`;
 const seconds = (s) => { const p = s.split(':').map(Number); return p.length === 2 ? p[0] * 60 + p[1] : p[0]; };
-const DIRECTIVE = /^(position|trim|tag|audio)\s*:\s*(.*)$/i;
+const DIRECTIVE = /^(position|trim|tag|audio|zoom)\s*:\s*(.*)$/i;
 const LINE = new RegExp(String.raw`^(${TIME})(?:\s*(?:-|–|to)\s*(${TIME}))?[\s:]+(\S.*)$`);
 const TAGS = new Set(['title', 'big', 'small', 'serif']);
 // What counts as an emoji for layout: pictographs, dingbats, arrows, and the joiners between them.
@@ -33,7 +34,7 @@ const plain = (t) => [...t.replace(/\*| \/ /g, ' ')].filter((ch) => !isEmoji(ch)
 // Returns { captions: [{ start, end, lines, tags }], position, trim, tag, audio, problems, warnings }.
 // problems stop the build (a line Fable cannot read); warnings go in the notes (too fast to read).
 export function parseCaptionScript(text, duration = Infinity) {
-  const out = { captions: [], position: null, trim: null, tag: null, audio: 'keep', problems: [], warnings: [] };
+  const out = { captions: [], position: null, trim: null, tag: null, audio: 'keep', zoom: null, problems: [], warnings: [] };
   const rows = [];
   text.split(/\r?\n/).forEach((raw, i) => {
     const line = raw.trim();
@@ -51,6 +52,7 @@ export function parseCaptionScript(text, duration = Infinity) {
         if (m && seconds(m[2]) > seconds(m[1])) out.trim = { start: seconds(m[1]), end: seconds(m[2]) };
         else out.problems.push(`line ${i + 1}: trim wants "start-end" in seconds, like 5-20.6`);
       } else if (key === 'tag') out.tag = /^(none|no|off)?$/i.test(v) ? null : v;
+      else if (key === 'zoom') out.zoom = /^(none|no|off)?$/i.test(v) ? null : 'slow';
       else out.audio = /mute|silent|none|off|no/i.test(v) ? 'mute' : 'keep';
       return;
     }

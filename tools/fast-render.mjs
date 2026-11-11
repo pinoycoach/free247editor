@@ -3,6 +3,7 @@
 // the HyperFrames composition stays for motion graphics the agent adds by hand.
 import { copyFileSync, existsSync, mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { zoomAnchor, zoomFilter } from './motion.mjs';
 
 const FPS = 30;
 
@@ -79,10 +80,31 @@ export function buildAss(plan, lay, style) {
     const longest = Math.max(...plan.hook.lines.map((l) => l.length));
     ev.push(`Dialogue: 1,${t(0)},${t(plan.hook.end)},Hook,,0,0,0,,{\\pos(${L.hookX},${L.hookY})${fit('x'.repeat(longest), L.hook, L.maxWidth)}${pop(70)}}${text}`);
   }
+  // Motion cards. A step label is a solid accent pill that slides into the hook card's slot once
+  // the hook is gone. A number callout is the caption for its figure: one bigger line in the
+  // accent color where "24" and "DAYS" would have flashed separately (the number over its unit
+  // when it is long), so those word captions are left out.
+  const cards = plan.motion?.cards || [];
+  const stats = cards.filter((c) => c.kind === 'stat');
+  if (cards.length) {
+    const dark = '&H00111111&', statSize = Math.round(L.word * 1.15);
+    styles.push(`Style: Stat,${font},${statSize},${accent},${accent},&H99000000,&HA0000000,-1,0,0,0,100,100,0,0,1,${outline},${shadow},5,60,60,0,1`);
+    styles.push(`Style: Step,${font},${Math.round(L.hook * 0.95)},${dark},${dark},${accent},${accent},-1,0,0,0,100,100,2,0,3,${Math.round(L.hook * 0.28)},0,5,60,60,0,1`);
+    for (const c of cards) {
+      if (c.kind === 'step') { ev.push(`Dialogue: 1,${t(c.start)},${t(c.end)},Step,,0,0,0,,{\\move(${L.hookX - 140},${L.hookY},${L.hookX},${L.hookY},0,160)\\fad(100,140)}${esc(c.text)}`); continue; }
+      const [number, ...unit] = c.text.split(' ');
+      const stacked = c.text.length > 9 && unit.length;
+      const body = stacked ? `${esc(number)}\\N{\\fs${Math.round(statSize * 0.6)}${fit(unit.join(' '), Math.round(statSize * 0.6), L.maxWidth)}}${esc(unit.join(' '))}` : esc(c.text);
+      ev.push(`Dialogue: 1,${t(c.start)},${t(c.end)},Stat,,0,0,0,,{\\pos(${L.capX},${L.capY})${stacked ? '' : fit(c.text, statSize, L.maxWidth)}${pop(60)}}${body}`);
+    }
+  }
+  const underStat = (c) => stats.some((s) => c.start >= s.start - 0.05 && c.start < s.end - 0.02);
   for (const c of plan.captions) {
     if (c.kind === 'word') {
+      if (underStat(c)) continue;
       const color = c.key && /\d/.test(c.text) ? `\\c${accent}` : '';
-      ev.push(`Dialogue: 0,${t(c.start)},${t(c.end)},Word,,0,0,0,,{\\pos(${L.capX},${L.capY})${fit(c.text, L.word, L.maxWidth)}${pop()}${color}}${esc(c.text)}`);
+      const cut = stats.find((s) => c.start < s.start && c.end > s.start); // never under a callout
+      ev.push(`Dialogue: 0,${t(c.start)},${t(cut ? cut.start : c.end)},Word,,0,0,0,,{\\pos(${L.capX},${L.capY})${fit(c.text, L.word, L.maxWidth)}${pop()}${color}}${esc(c.text)}`);
       continue;
     }
     // Group modes: the whole phrase holds, each word turns on at its onset.
@@ -121,6 +143,12 @@ export function renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, 
   const inputs = ['-i', 'assets/footage.mp4', '-i', 'assets/mix.wav'];
   const chain = [];
   let base = '[0:v]';
+  // Punch-ins on the footage itself, before anything is laid over it (B-roll and text stay put).
+  const zooms = plan.motion?.zooms || [];
+  if (zooms.length) {
+    chain.push(...zoomFilter(zooms, F.w, F.h, zoomAnchor(lay.fit === 'cover' ? plan.face : null, style.position), D, base, '[punched]'));
+    base = '[punched]';
+  }
   if (lay.fit !== 'cover') {
     chain.push(`color=c=0x0b0f17:s=${lay.w}x${lay.h}:r=${FPS}:d=${D}[bg]`);
     chain.push(`[bg]${base}overlay=${F.x}:${F.y}:shortest=1[base0]`);

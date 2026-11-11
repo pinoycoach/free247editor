@@ -151,6 +151,31 @@ outputs in the folder (`*_final.mp4`, `*-v2.mp4`). Look at `assets/review-shots.
 project to check order and placement. On approval, `--final`. A brief may ask for the video to
 be saved back to its folder; that is an upload, so ask first, then copy it there.
 
+## Motion: punch-ins, number callouts, step labels
+
+The style line "Graphics:" decides this, and the fast renderer draws it in the same pass as the
+captions (seconds, no Chrome). `minimal` adds nothing, `some` keeps it sparse, `heavy` allows more.
+
+- Punch-ins: a 10% zoom on the lines that carry weight (a short punchy sentence, a number, a
+  question, or simply after ten seconds without one), held for the sentence. A hard cut when the
+  edge sits on a cut, a four-frame ease otherwise. The zoom is held on the edge of the face
+  nearest the captions, so the text never ends up on the forehead or chin. Never during the hook.
+- Number callouts: a figure said with its unit ("24 days", "7.2 trillion pesos") shows as one
+  bigger caption in the accent color in place of its separate words, with a soft pop. Dates and
+  years are left alone. Word-by-word captions only.
+- Step labels: when the speaker counts a list ("rule number one... rule number two", "una...
+  pangalawa"), each step gets a small accent pill in the hook card's slot. One stray "first" is
+  not a list and gets nothing.
+
+Everything is planned from the words on every build, so it follows the cut; the notes list each
+punch-in and card. Check them on the draft: a zoom on a line that does not deserve it is worse
+than none. To change them, copy `"motion"` from `assets/plan.json` into `edit.json` and delete or
+retime an entry (times are on the cut timeline), or set `"motion": false`; for more or fewer,
+`"style": {"graphics": "heavy"}` or `"minimal"`. Projects made before motion existed keep their
+look on rebuild and final; `"motion": true` in their `edit.json` opts one in. The browser
+renderer does not draw these (it has its own push-in). App mockups and custom cards are still
+hand work in `index.html` (step 4 above).
+
 ## Written captions on a clip: "caption this", a skit, an AI clip, a quiet take
 
 When the captions carry the video and the words are written, not spoken (a funny line per pose,
@@ -163,6 +188,7 @@ position: lower          (optional: upper | middle | lower | 0..1; default is un
 trim: 5-20.6             (optional: use only this part; caption times count from its start)
 tag: AI-generated        (optional: only when the clip does not already show a tag)
 audio: mute              (optional: default keeps the clip's own sound)
+zoom: slow               (optional: a very slow push-in, for a static single take)
 
 0-1.3   [title] [serif] KA-VOGUE,
 1.3     ang laki ng next / water bill mo.

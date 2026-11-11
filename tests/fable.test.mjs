@@ -192,3 +192,63 @@ test('caption script: timed lines, open ends, tags, directives, and reading-spee
   assert.ok(captionCenter(null, null, 0.1) > 0.5 && captionCenter(0.99, null, 0.1) <= 0.75 + 1e-9);
   assert.ok(captionCenter('upper', face, 0.1) < 0.3);
 });
+
+test('motion: punch-ins on the lines that carry weight, number callouts, step labels only for a real list', async () => {
+  const { planMotion, zoomFilter, zoomAnchor } = await import('../tools/motion.mjs');
+  const say = (text, t0, gap = 0.3) => text.split(' ').map((w, i) => W(w, r(t0 + i * gap), r(t0 + i * gap + 0.25)));
+  const r = (n) => Math.round(n * 1000) / 1000;
+  const words = [
+    ...say('Here is the thing about the trial that nobody mentions out loud.', 0.2),
+    ...say('It stopped for 24 days.', 4.5),
+    ...say('The senate moved on to the budget and kept going like nothing happened at all.', 6.5),
+    ...say("Don't lend it.", 12.0),
+    ...say('They spent 7.2 trillion pesos, and that was only the start of it.', 13.5),
+    ...say('October 16, they came back to the floor.', 18.0),
+  ];
+  const segments = [{ out0: 0, out1: 12 }, { out0: 12, out1: 21 }];
+  const some = planMotion(words, segments, 21, { graphics: 'some', captions: 'word' }, 2.4);
+  // Nothing during the hook; every zoom starts on a sentence and never overlaps another.
+  assert.ok(some.zooms.length >= 2);
+  assert.ok(some.zooms.every((z) => z.start >= 2.4 && z.end > z.start && z.scale === 1.1));
+  for (let i = 1; i < some.zooms.length; i++) assert.ok(some.zooms[i].start >= some.zooms[i - 1].end + 3 - 1e-6);
+  // The short punchy line is punched in, hard because it sits on a cut.
+  const lend = some.zooms.find((z) => /lend/.test(z.on));
+  assert.ok(lend && lend.in === 0);
+  // Figures with their unit become callouts; a date ("October 16") does not.
+  assert.deepEqual(some.cards.map((c) => c.text), ['24 DAYS', '7.2 TRILLION PESOS']);
+  assert.ok(some.cards.every((c) => c.kind === 'stat' && c.end > c.start));
+  // Callouts stand in for word captions, so other caption modes get none.
+  assert.equal(planMotion(words, segments, 21, { graphics: 'some', captions: 'subtitles' }, 2.4).cards.length, 0);
+  // minimal plans nothing; heavy allows more than some.
+  assert.deepEqual(planMotion(words, segments, 21, { graphics: 'minimal', captions: 'word' }, 2.4), { zooms: [], cards: [] });
+  assert.ok(planMotion(words, segments, 21, { graphics: 'heavy', captions: 'word' }, 2.4).zooms.length >= some.zooms.length);
+  // One "first" is a figure of speech; a list that counts up gets step labels.
+  const once = planMotion(say('First I thought it was a joke and I laughed about it.', 3), [{ out0: 0, out1: 9 }], 9, { graphics: 'some', captions: 'word' }, 0);
+  assert.equal(once.cards.length, 0);
+  const list = [...say('Here are the rules I follow every single day now.', 0.2), ...say('Rule number one, drink water before coffee.', 4), ...say('Rule number two, walk after every meal you eat.', 8), ...say('Third, sleep by ten.', 13)];
+  const steps = planMotion(list, [{ out0: 0, out1: 16 }], 16, { graphics: 'some', captions: 'word' }, 0).cards.filter((c) => c.kind === 'step');
+  assert.deepEqual(steps.map((c) => c.text), ['RULE 1', 'RULE 2', '#3']);
+  // The filter: nothing without zooms; with them, a per-frame scale laid over a canvas at the anchor.
+  assert.deepEqual(zoomFilter([], 1080, 1920, { x: 0.5, y: 0.4 }, 10, '[0:v]', '[z]'), []);
+  const f = zoomFilter([{ start: 2, end: 4, scale: 1.1, in: 0.13, out: 0 }], 1080, 1920, { x: 0.5, y: 0.2 }, 10, '[0:v]', '[z]').join(';');
+  assert.match(f, /eval=frame/);
+  assert.match(f, /clip\(\(t-2\)\/0\.13,0,1\)\*lt\(t,4\)/);
+  assert.match(f, /\[z\]$/);
+  // The anchor keeps the edge of the face nearest the text where it was.
+  const face = { face_top_p10: 0.2, chin_p90: 0.6, cx_median: 0.55, cy_median: 0.4 };
+  assert.equal(zoomAnchor(face, 'upper').y, 0.2);
+  assert.equal(zoomAnchor(face, 'lower').y, 0.6);
+  assert.deepEqual(zoomAnchor(null, 'upper'), { x: 0.5, y: 0.4 });
+});
+
+test('motion in the fast renderer: a callout replaces the word captions under it', () => {
+  const lay = layoutFor('vertical', { width: 1080, height: 1920 });
+  const plan = { slug: 't', duration: 6, segments: [], hook: null, words: [],
+    captions: [{ kind: 'word', text: 'FOR', start: 1, end: 1.4, key: false }, { kind: 'word', text: '24', start: 1.4, end: 1.8, key: true }, { kind: 'word', text: 'DAYS', start: 1.8, end: 2.3, key: true }, { kind: 'word', text: 'THEN', start: 2.6, end: 3, key: false }],
+    motion: { zooms: [], cards: [{ kind: 'stat', text: '24 DAYS', start: 1.4, end: 2.5 }, { kind: 'step', text: 'RULE 1', start: 4, end: 5.8 }] } };
+  const ass = buildAss(plan, lay, tight);
+  const lines = ass.split('\n').filter((l) => l.startsWith('Dialogue:'));
+  assert.equal(lines.filter((l) => /,Stat,/.test(l) && /24 DAYS$/.test(l)).length, 1);
+  assert.equal(lines.filter((l) => /,Step,/.test(l) && /RULE 1$/.test(l) && /\move/.test(l)).length, 1);
+  assert.equal(lines.filter((l) => /,Word,/.test(l)).length, 2); // FOR and THEN; 24 and DAYS are the callout
+});

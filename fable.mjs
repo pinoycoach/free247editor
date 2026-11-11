@@ -32,6 +32,7 @@ import { captionLayout, hasFastFonts, renderFast, reviewSheets } from './tools/f
 import { alignScript, hookFromScript } from './tools/script-align.mjs';
 import { isOutput, orderClips, parseBrief, stitchFrame, wrapCaption } from './tools/stitch.mjs';
 import { captionCenter, parseCaptionScript } from './tools/caption-script.mjs';
+import { planMotion } from './tools/motion.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -753,6 +754,8 @@ function buildMix(dir, plan, style, duration) {
       const s = plan.segments[i], removed = s.src0 - plan.segments[i - 1].src1;
       if (removed >= 1.0 && s.out0 - last >= 1.5) { cues.push(['click', r3(s.out0), 0.12]); last = s.out0; }
     }
+    // Graphics get a sound of their own: a soft whoosh under a step label, a pop under a number.
+    for (const c of plan.motion?.cards || []) cues.push(c.kind === 'step' ? ['whoosh', r3(Math.max(0, c.start - 0.1)), 0.1] : ['pop', c.start, 0.1]);
   }
   const inputs = ['-i', 'assets/voice.wav'], f = [], mix = ['[voice]'];
   f.push(`[0:a]asplit=2[voice][side]`);
@@ -1008,7 +1011,14 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   if (face) style.face = face;
   // The house rule for AI-made footage: a tag on every frame. From edit.json "tag" or --tag.
   const tag = edit.tag || opt.tag || null;
-  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, 0, tl.duration), words: tl.words, dropped: tl.dropped, network: [], face, tag };
+  // Motion ("Graphics:" in the style): punch-ins and cards, planned from the words on every build so
+  // they follow the cut. edit.json "motion": false turns it off; an object there replaces the plan.
+  // Projects made before motion existed (version 1) keep their look, so a draft approved without
+  // it does not gain zooms in its final; "motion": true opts one in.
+  const motion = edit.motion === false || (!(edit.version >= 2) && edit.motion === undefined) ? { zooms: [], cards: [] }
+    : edit.motion && typeof edit.motion === 'object' ? { zooms: edit.motion.zooms || [], cards: edit.motion.cards || [], byHand: true }
+      : planMotion(tl.words, tl.segments, tl.duration, style, hookEnd);
+  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, 0, tl.duration), words: tl.words, dropped: tl.dropped, network: [], face, tag, motion };
   if (edit.transcription?.provider === 'groq') plan.network.push('audio was sent to Groq for transcription');
   const formats = style.format === 'both' ? ['vertical', 'horizontal'] : [style.format];
   const useBrowser = (edit.style?.engine || opt.engine) === 'browser' || !hasFastFonts(fontsDir);
@@ -1093,6 +1103,9 @@ function notes(dir, edit, result, suggestions) {
     edit.transcription?.missed?.length ? `- LOW COVERAGE: voice with no transcript words at ${edit.transcription.missed.map((m) => `${fmt(m.start)}-${fmt(m.end)}`).join(', ')} (source time). Kept uncut. Listen there and add words with "extra" if needed.` : null,
     plan.hook ? `- Hook card for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}" (${plan.hook.pattern || 'custom'}: ${plan.hook.why || 'set by hand'}). Captions keep running under it.` : '- No hook text (per your style).',
     `- Format ${style.format}, color ${style.grade}${result.renders?.[0]?.engine?.startsWith('browser') ? ', slow push-in on every shot' : ''}.`,
+    plan.motion?.zooms?.length || plan.motion?.cards?.length
+      ? `- Motion (graphics: ${plan.motion.byHand ? 'set by hand in edit.json' : style.graphics}): ${plan.motion.zooms.length} punch-in${plan.motion.zooms.length === 1 ? '' : 's'}${plan.motion.zooms.length ? ` (${plan.motion.zooms.map((z) => `${fmt(z.start)} "${z.on || ''}"`).join(', ')})` : ''}${plan.motion.cards.length ? `; cards: ${plan.motion.cards.map((c) => `"${c.text}" at ${fmt(c.start)}`).join(', ')}` : ''}. ${result.renders?.[0]?.engine?.startsWith('browser') ? 'The browser renderer does not draw these; it has its own push-in.' : 'Drop one by copying "motion" from assets/plan.json into edit.json and deleting it; "motion": false turns all of it off.'}`
+      : style.graphics === 'minimal' ? '- Motion: none (graphics: minimal in your style).' : null,
     plan.tag ? `- Tag "${plan.tag}" on every frame, top right (house rule for AI-made footage).` : null,
     result.renders?.length ? `- Rendered with ${result.renders.map((r) => r.engine + (r.seconds ? ` in ${r.seconds} s` : '')).join(' and ')}.` : null,
     plan.memory?.hogs?.length ? `- Memory was tight (${plan.memory.free} GB free): ${plan.memory.hogs.slice(0, 3).join(', ')}. Fable used the light encoder path.` : null,
@@ -1189,7 +1202,7 @@ async function edit(video) {
   const missed = info.hasAudio ? untranscribed(words, silences, norm.duration) : [];
   if (missed.length) log(`voice without words at ${missed.map((m) => `${m.start}-${m.end}s`).join(', ')}: kept, check the transcript there`);
   const editDoc = {
-    version: 1, slug, created: new Date().toISOString(),
+    version: 2, slug, created: new Date().toISOString(),
     source: { file: source, duration: norm.duration, width: norm.width, height: norm.height, hasAudio: info.hasAudio },
     transcription: { provider, words: words.length, voicedSeconds: r3(norm.duration - silences.reduce((a, s) => a + (Math.min(s.end, norm.duration) - s.start), 0)), missed },
     style: {}, segments: cuts.keeps.map((k) => ({ src0: r3(k.src0), src1: r3(k.src1) })),
@@ -1197,7 +1210,7 @@ async function edit(video) {
     suggestions: cuts.suggestions.map((s) => ({ ...s, start: r3(s.start), end: r3(s.end) })),
     fixes: scriptFixes || {}, extra: scriptExtra || [],
     script: scriptInfo,
-    _help: 'EDIT THESE: segments (kept source ranges in order, seconds; the only thing that decides the cut), fixes {"<word index in raw.json>": "new text" or ""}, extra [{"text":"Amen.","start":s,"end":s}] in source time for words the transcript missed, hook (a candidate number from the notes, {"lines":[..],"end":seconds}, or null), style (overrides: format/captions/position/color/accent/hook/pace/grade/sound/broll/retakes/stutters/privacy/engine fast|browser), broll (delete one to drop it, [] for none, remove the key to search again). READ ONLY: source, transcription, removed, suggestions (what Fable did and saw; editing them changes nothing). assets/plan.json is the computed result.',
+    _help: 'EDIT THESE: segments (kept source ranges in order, seconds; the only thing that decides the cut), fixes {"<word index in raw.json>": "new text" or ""}, extra [{"text":"Amen.","start":s,"end":s}] in source time for words the transcript missed, hook (a candidate number from the notes, {"lines":[..],"end":seconds}, or null), style (overrides: format/captions/position/color/accent/hook/pace/grade/sound/broll/retakes/stutters/privacy/engine fast|browser), broll (delete one to drop it, [] for none, remove the key to search again), motion (false for no punch-ins or cards; or copy "motion" from assets/plan.json here and delete or retime a zoom or card, times are on the cut timeline; style.graphics minimal|some|heavy sets how many). READ ONLY: source, transcription, removed, suggestions (what Fable did and saw; editing them changes nothing). assets/plan.json is the computed result.',
   };
   writeFileSync(join(dir, 'edit.json'), JSON.stringify(editDoc, null, 2));
   const result = await build(dir, editDoc, { quality: opt.quality, render: !opt['no-render'] });
@@ -1211,7 +1224,7 @@ async function edit(video) {
 
 // edit.json is hand-edited, so it is checked before it is trusted. Problems stop the build with a
 // plain message; things that are merely ignored get a warning.
-const KNOWN_KEYS = new Set(['version', 'slug', 'created', 'source', 'transcription', 'script', 'style', 'segments', 'removed', 'deletes', 'suggestions', 'fixes', 'extra', 'hook', 'broll', 'tag', '_help']);
+const KNOWN_KEYS = new Set(['version', 'slug', 'created', 'source', 'transcription', 'script', 'style', 'segments', 'removed', 'deletes', 'suggestions', 'fixes', 'extra', 'hook', 'broll', 'motion', 'tag', '_help']);
 function validateEdit(doc) {
   const d = doc.source?.duration;
   if (!Array.isArray(doc.segments) || !doc.segments.length) die('edit.json: segments must be a non-empty list of {src0, src1}');
@@ -1236,7 +1249,7 @@ async function rebuild(slug, finalRender = false) {
   const result = await build(dir, doc, { quality: finalRender ? (opt.quality === 'draft' ? 'standard' : opt.quality) : opt.quality, render: !opt['no-render'], finalName: finalRender });
   // A rebuild that changed nothing should look like one.
   if (before) {
-    const p = result.plan, same = before.duration === p.duration && before.segments.length === p.segments.length && before.words.length === p.words.length && JSON.stringify(before.hook) === JSON.stringify(p.hook) && JSON.stringify(before.captions) === JSON.stringify(p.captions);
+    const p = result.plan, same = before.duration === p.duration && before.segments.length === p.segments.length && before.words.length === p.words.length && JSON.stringify(before.hook) === JSON.stringify(p.hook) && JSON.stringify(before.captions) === JSON.stringify(p.captions) && JSON.stringify(before.motion || null) === JSON.stringify(p.motion || null);
     log(same ? 'rebuild: nothing changed in the cut, captions, or hook (edit segments, fixes, extra, hook, or style to change the video)'
       : `rebuild: pieces ${before.segments.length} -> ${p.segments.length}, duration ${before.duration}s -> ${p.duration}s, words ${before.words.length} -> ${p.words.length}, hook end ${before.hook?.end ?? '-'} -> ${p.hook?.end ?? '-'}`);
   }
@@ -1413,7 +1426,12 @@ function captionVideo(target) {
   }
 
   const inputs = ['-ss', String(start), '-t', String(duration + 0.2), '-i', source], chain = [];
-  chain.push(`[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H},setsar=1,fps=${FPS},format=yuv420p[b0]`);
+  if (script.zoom) {
+    // A very slow push-in so a static take never sits still. Drawn on a 2x copy so the move lands
+    // on half pixels instead of stepping, and held on the face so it grows in place.
+    const n = Math.round(duration * FPS), ax = face?.cx_median ?? 0.5, ay = face?.cy_median ?? 0.4;
+    chain.push(`[0:v]fps=${FPS},scale=${2 * W}:${2 * H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${2 * W}:${2 * H},setsar=1,zoompan=z='1+0.06*on/${Math.max(1, n - 1)}':x='(iw-iw/zoom)*${ax}':y='(ih-ih/zoom)*${ay}':d=1:s=${W}x${H}:fps=${FPS},format=yuv420p[b0]`);
+  } else chain.push(`[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H},setsar=1,fps=${FPS},format=yuv420p[b0]`);
   placed.forEach((p, j) => {
     inputs.push('-i', p.file);
     const c = script.captions[j]; // the tag, placed last, has no caption and shows on every frame
@@ -1450,6 +1468,7 @@ function captionVideo(target) {
     `- Put ${script.captions.length} written captions on the clip, each at its own time. No cuts, no transcription, no speed changes.`,
     ...script.captions.map((c) => `  - ${fmt(c.start)}-${fmt(c.end)}: "${c.lines.join(' / ')}"${c.tags.length ? ` [${c.tags.join(', ')}]` : ''}`),
     `- Captions centered at ${Math.round(center * 100)}% of the height${script.position ? ` (position: ${script.position})` : face ? `, under the chin (face measured: chin at ${Math.round(face.chin_p90 * 100)}%)` : ' (no face data; lower-middle)'}, inside the band the apps leave free.`,
+    script.zoom ? '- A very slow push-in (6%) over the whole clip, held on the face.' : null,
     `- Sound: ${keepAudio ? "the clip's own audio, untouched" : 'silent track (add the sound in the app)'}.`,
     tag ? `- House rule: "${tag}" tag top right on every frame.` : '- No AI tag added (pass --tag AI-generated, or a "tag:" line, if the footage is AI-made and does not already show one).',
     '- Nothing left the computer.', '',

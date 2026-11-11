@@ -14,7 +14,7 @@ editing or coding terms. Run every command from the repo root unless a step says
 | Path | What it is |
 | --- | --- |
 | `setup.mjs` | One-time setup. Safe to re-run. |
-| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `watch`, `status`, `clean`, `review`. |
+| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `check`, `watch`, `status`, `clean`, `review`. |
 | `tools/transcribe.mjs` | Free word-level transcription (Groq, or `--local` faster-whisper). |
 | `tools/review.mjs` | Opt-in draft review by Gemini (`node fable.mjs review <slug>`). |
 | `inbox/` | Raw videos the user wants edited. |
@@ -266,6 +266,31 @@ growing, writing drafts and notes to `outbox/`. Errors land in `outbox/<name>-er
 Tell the user to keep that terminal open; closing it stops the watcher. When they come back
 with notes on a watched draft, continue from "Notes become rules" using the slug in the
 notes file.
+
+## The draft check: every render is checked before you show it
+
+After every render (`edit`, `rebuild`, `final`, `caption`, `stitch`) Fable reads the finished
+file start to end, in a few seconds, and writes a "Draft check" section into the notes:
+
+- FIX: wrong for a viewer. Black on frame 0 or a black gap, text under the app header or
+  buttons (outside the band from 14% to 80% of the height), text over the mouth.
+- LOOK: needs your eye. Text on the eyes or cheeks, sound much quieter or louder than the
+  -14 LUFS the apps play at, peaks that may crackle, a silent or missing sound track, a picture
+  that freezes before the end, an odd frame shape.
+- ok: what passed, in one line.
+
+The face is measured in the finished video twice a second, so zooms, crops and B-roll are all
+accounted for, and each finding names its time and the words on screen. When there is anything
+to fix or look at, `assets/check-moments.jpg` in the project shows exactly those frames: open it,
+then fix every FIX before showing the draft (move the text with `style.position` or a
+`position:` line, change the cut, or drop a card), and tell the user about each LOOK you leave
+in. Never report a draft as checked when the notes say the check was skipped.
+`assets/review-shots.png` now covers the whole video, not only its first shots.
+
+`node fable.mjs check <slug>` runs it again on the newest draft or final;
+`node fable.mjs check <file.mp4>` runs it on any video, including a hand-built one or a clip from
+another tool. For those it cannot know where the text is, so it checks the file, the sound and
+the picture and says so. `--no-check` skips it on a render.
 
 ## Disk: "clean up", "free space", a render that fails on a full disk
 

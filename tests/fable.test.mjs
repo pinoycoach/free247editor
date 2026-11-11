@@ -283,3 +283,66 @@ test('clean: only what a rebuild writes again goes; the working copy goes only w
   assert.deepEqual(paths(cap), ['assets/cap00.png', 'assets/review-shots.png', 'assets/tag.png']);
   assert.deepEqual(paths(cleanTargets([f('stitch.json'), f('assets/caption.ttf'), f('assets/caption.txt')], { kind: 'stitch', delivered, settled: true })), ['assets/caption.ttf']);
 });
+
+test('draft check: the file, the sound, the picture, and text against the app buttons and the face', async () => {
+  const { parseDetect, checkFindings, safeZoneFindings, faceFindings, verdict, checkLines } = await import('../tools/check.mjs');
+  const stderr = [
+    '[blackdetect @ 0x1] black_start:0 black_end:0.4 black_duration:0.4',
+    '[freezedetect @ 0x2] lavfi.freezedetect.freeze_start: 27.5',
+    '[Parsed_ebur128_0 @ 0x3] Summary:', '', '  Integrated loudness:', '    I:         -25.2 LUFS', '    Threshold: -35.5 LUFS', '', '  Loudness range:', '    LRA:         2.7 LU', '', '  True peak:', '    Peak:       -0.1 dBFS',
+  ].join('\n');
+  const d = parseDetect(stderr);
+  assert.deepEqual(d.black, [{ start: 0, end: 0.4 }]);
+  assert.deepEqual(d.freezes, [{ start: 27.5, end: Infinity }]);
+  assert.deepEqual(d.loudness, { I: -25.2, peak: -0.1 });
+  const probe = { width: 1080, height: 1920, duration: 30, fps: 30, hasAudio: true, audioDuration: 30 };
+  const box = (text, start, end, y0, y1, x0 = 240, x1 = 840) => ({ kind: 'caption', text, start, end, x0, y0, x1, y1 });
+  // A face in the middle of the frame: brows near 40%, mouth at 52%, chin at 58%.
+  const faces = Array.from({ length: 60 }, (_, i) => ({ t: i / 2, cx: 0.5, cy: 0.46, top: 0.34, chin: 0.58, eyes: 0.42, mouth: 0.52 }));
+  // Text on the forehead is how captions usually sit: fine. On the eyes: look. Over the mouth: fix.
+  assert.equal(faceFindings([box('FOREHEAD', 0, 5, 620, 740)], faces, 1080, 1920)[0].level, 'ok');
+  assert.equal(faceFindings([box('EYES', 0, 5, 760, 880)], faces, 1080, 1920)[0].level, 'look');
+  const mouth = faceFindings([box('MOUTH', 2, 4, 940, 1040)], faces, 1080, 1920);
+  assert.equal(mouth[0].level, 'fix');
+  assert.match(mouth[0].text, /00:02\.0-00:03\.5 \("MOUTH"\)/);
+  // Text beside the face, or shown when no face is on screen, is not a problem.
+  assert.equal(faceFindings([box('SIDE', 0, 5, 940, 1040, 40, 300)], faces, 1080, 1920)[0].level, 'ok');
+  assert.equal(faceFindings([box('LATER', 40, 45, 940, 1040)], faces, 1080, 1920)[0].level, 'ok');
+  // The band the apps leave free: below the top 14%, above the bottom 20%. The AI tag is exempt.
+  assert.equal(safeZoneFindings([box('FINE', 0, 2, 400, 520)], 1080, 1920)[0].level, 'ok');
+  assert.match(safeZoneFindings([box('HIGH', 0, 2, 120, 240)], 1080, 1920)[0].text, /above the top 269px/);
+  assert.match(safeZoneFindings([box('LOW', 0, 2, 1500, 1620)], 1080, 1920)[0].text, /below 1536px/);
+  assert.equal(safeZoneFindings([{ ...box('AI', 0, 30, 250, 290), kind: 'tag' }], 1080, 1920)[0].level, 'ok');
+  // Everything together: black on frame 0 is a fix; quiet sound, hot peaks and a frozen ending are looks.
+  const all = checkFindings({ probe, ...d, faces, boxes: [box('MOUTH', 2, 4, 940, 1040)] });
+  const v = verdict(all);
+  assert.equal(v.fix, 2);
+  assert.ok(all.some((f) => f.level === 'fix' && /black at the very start/.test(f.text)));
+  assert.ok(all.some((f) => f.level === 'look' && /quiet: -25.2 LUFS/.test(f.text)));
+  assert.ok(all.some((f) => f.level === 'look' && /peaks reach -0.1/.test(f.text)));
+  assert.ok(all.some((f) => f.level === 'look' && /frozen for the last 2.5 s/.test(f.text)));
+  const lines = checkLines(all, 'assets/check-moments.jpg');
+  assert.match(lines[0], /^## Draft check: 2 to fix, 3 to look at$/);
+  assert.ok(lines.indexOf(lines.find((l) => l.startsWith('- FIX'))) < lines.indexOf(lines.find((l) => l.startsWith('- LOOK'))));
+  // A clean draft says so, and a video Fable did not build is honest about what it cannot know.
+  const clean = checkFindings({ probe, black: [], freezes: [], loudness: { I: -14, peak: -1.5 }, faces, boxes: [box('FOREHEAD', 0, 5, 620, 740)] });
+  assert.equal(verdict(clean).line, 'clean');
+  assert.ok(checkFindings({ probe, black: [], freezes: [], loudness: { I: -14, peak: -1.5 }, faces, boxes: null }).some((f) => /not built by Fable/.test(f.text)));
+  // A silent track and a missing one are different things.
+  assert.ok(checkFindings({ probe, black: [], freezes: [], loudness: { I: -70, peak: -90 }, faces, boxes: [] }).some((f) => /silent/.test(f.text)));
+  assert.ok(checkFindings({ probe: { ...probe, hasAudio: false }, black: [], freezes: [], loudness: null, faces, boxes: [] }).some((f) => /no sound track/.test(f.text)));
+});
+
+test('text boxes follow the same layout the renderer draws with', async () => {
+  const { textBoxes } = await import('../tools/fast-render.mjs');
+  const lay = layoutFor('vertical', { width: 1080, height: 1920 });
+  const plan = { hook: { lines: ['24 DAYS.', 'NO TRIAL.'], end: 3 }, captions: [{ kind: 'word', text: 'FOR', start: 3, end: 3.4 }, { kind: 'word', text: '24', start: 3.4, end: 3.8 }, { kind: 'word', text: 'THEN', start: 4.6, end: 5 }],
+    motion: { zooms: [], cards: [{ kind: 'stat', text: '24 DAYS', start: 3.4, end: 4.5 }] } };
+  const boxes = textBoxes(plan, lay, tight);
+  const L = captionLayout(lay, tight);
+  assert.deepEqual(boxes.map((b) => b.kind), ['hook', 'stat', 'caption', 'caption']); // "24" is the callout, not a caption
+  const hook = boxes[0], cap = boxes[2];
+  assert.ok(hook.y0 < L.hookY && hook.y1 > L.hookY && hook.end === 3);
+  assert.ok(cap.y0 < L.capY && cap.y1 > L.capY && cap.x0 >= 0 && cap.x1 <= 1080);
+  assert.ok(hook.y1 <= cap.y0 + 40); // the card sits above the caption line
+});

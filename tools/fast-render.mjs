@@ -95,7 +95,11 @@ export function buildAss(plan, lay, style) {
       const [number, ...unit] = c.text.split(' ');
       const stacked = c.text.length > 9 && unit.length;
       const body = stacked ? `${esc(number)}\\N{\\fs${Math.round(statSize * 0.6)}${fit(unit.join(' '), Math.round(statSize * 0.6), L.maxWidth)}}${esc(unit.join(' '))}` : esc(c.text);
-      ev.push(`Dialogue: 1,${t(c.start)},${t(c.end)},Stat,,0,0,0,,{\\pos(${L.capX},${L.capY})${stacked ? '' : fit(c.text, statSize, L.maxWidth)}${pop(60)}}${body}`);
+      // A two-line callout grows away from the face: up from the caption line when captions sit
+      // above the face, down when they sit under the chin (the draft check found it on the brows).
+      const edge = Math.round(L.word * 0.55);
+      const place = !stacked || style.position === 'middle' ? `\\pos(${L.capX},${L.capY})` : style.position === 'lower' ? `\\an8\\pos(${L.capX},${L.capY - edge})` : `\\an2\\pos(${L.capX},${L.capY + edge})`;
+      ev.push(`Dialogue: 1,${t(c.start)},${t(c.end)},Stat,,0,0,0,,{${place}${stacked ? '' : fit(c.text, statSize, L.maxWidth)}${pop(60)}}${body}`);
     }
   }
   const underStat = (c) => stats.some((s) => c.start >= s.start - 0.05 && c.start < s.end - 0.02);
@@ -131,6 +135,39 @@ export function buildAss(plan, lay, style) {
     ...styles, '',
     '[Events]', 'Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text', ...ev, '',
   ].join('\n');
+}
+
+// Where every piece of text sits and when, in output pixels, for the draft check. The same
+// numbers buildAss() draws with: { start, end, x0, y0, x1, y1, text, kind }.
+export function textBoxes(plan, lay, style) {
+  const L = captionLayout(lay, style), W = lay.w, out = [];
+  const box = (kind, text, start, end, cy, size, lines = 1) => {
+    const longest = Math.max(...String(text).split('\n').map((l) => l.length));
+    const w = Math.min(L.maxWidth, longest * size * 0.72), h = size * 1.1 * lines;
+    out.push({ kind, text: String(text).replace(/\n/g, ' '), start, end, x0: Math.round(W / 2 - w / 2), x1: Math.round(W / 2 + w / 2), y0: Math.round(cy - h / 2), y1: Math.round(cy + h / 2) });
+  };
+  if (plan.hook) box('hook', plan.hook.lines.join('\n'), 0, plan.hook.end, L.hookY, L.hook * 1.14, plan.hook.lines.length);
+  const cards = plan.motion?.cards || [], stats = cards.filter((c) => c.kind === 'stat');
+  const statSize = Math.round(L.word * 1.15);
+  for (const c of cards) {
+    if (c.kind === 'step') { box('step', c.text, c.start, c.end, L.hookY, L.hook * 1.4); continue; }
+    const [number, ...unit] = c.text.split(' ');
+    if (c.text.length > 9 && unit.length) {
+      // Two lines, anchored on the caption line's far edge from the face (see buildAss).
+      const h = statSize * 0.8 * 1.1 * 2, edge = L.word * 0.55;
+      const cy = style.position === 'middle' ? L.capY : style.position === 'lower' ? L.capY - edge + h / 2 : L.capY + edge - h / 2;
+      box('stat', `${number}\n${unit.join(' ')}`, c.start, c.end, cy, statSize * 0.8, 2);
+    }
+    else box('stat', c.text, c.start, c.end, L.capY, statSize);
+  }
+  for (const c of plan.captions || []) {
+    if (c.kind === 'word') {
+      if (stats.some((s) => c.start >= s.start - 0.05 && c.start < s.end - 0.02)) continue;
+      const cut = stats.find((s) => c.start < s.start && c.end > s.start);
+      box('caption', c.text, c.start, cut ? cut.start : c.end, L.capY, L.word);
+    } else box('caption', c.words.map((w) => w.text).join(' '), c.start, c.end, L.capY, style.captions === 'subtitles' ? L.sub * 1.3 : L.group * 1.15);
+  }
+  return out;
 }
 
 // One FFmpeg pass: background (band layouts), footage, B-roll inserts, captions, mix.
@@ -188,10 +225,15 @@ export function renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, 
 export function reviewSheets(dir, video, plan, ff) {
   const open = join(dir, 'assets/review-open.png');
   ff(['-i', video, '-t', '2.5', '-vf', `fps=4,scale=640:-1,tile=3x3`, '-frames:v', '1', open], dir);
-  const mids = plan.segments.slice(0, 9).map((s) => (s.out0 + s.out1) / 2);
-  const sel = mids.map((m) => `eq(n\\,${Math.round(m * FPS)})`).join('+');
+  // The whole video, not just its start: the middle of every shot, and long shots every 4 s,
+  // thinned evenly to 40 frames when there are more.
+  let mids = plan.segments.flatMap((s) => { const n = Math.max(1, Math.round((s.out1 - s.out0) / 4)); return Array.from({ length: n }, (_, i) => s.out0 + (s.out1 - s.out0) * (i + 0.5) / n); });
+  if (mids.length > 40) mids = Array.from({ length: 40 }, (_, i) => mids[Math.floor(i * mids.length / 40)]);
+  const frames = [...new Set(mids.map((m) => Math.round(m * FPS)))];
+  const cols = Math.min(8, Math.max(3, Math.ceil(Math.sqrt(frames.length))));
+  const sel = frames.map((n) => `eq(n\\,${n})`).join('+');
   const shots = join(dir, 'assets/review-shots.png');
-  ff(['-i', video, '-vf', `select=${sel},scale=640:-1,tile=3x3`, '-fps_mode', 'vfr', '-frames:v', '1', shots], dir);
+  ff(['-i', video, '-vf', `select=${sel},scale=${frames.length > 9 ? 360 : 640}:-2,tile=${cols}x${Math.ceil(frames.length / cols)}`, '-fps_mode', 'vfr', '-frames:v', '1', '-update', '1', shots], dir);
   return { open, shots };
 }
 export const hasFastFonts = (fontsDir) => existsSync(join(fontsDir, 'Montserrat-ExtraBold.ttf'));

@@ -44,6 +44,7 @@ while True:
             "t": round(i / fps, 2),
             "cx": round(float(x + w / 2) / iw, 3), "cy": round(float(y + h / 2) / ih, 3),
             "top": round(float(y) / ih, 3), "chin": round(float(y + h) / ih, 3),
+            "eyes": round(float((f[5] + f[7]) / 2) / ih, 3),
             "mouth": round(float((f[11] + f[13]) / 2) / ih, 3), "score": round(float(f[14]), 2),
         })
     i += 1

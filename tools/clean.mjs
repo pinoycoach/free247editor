@@ -32,7 +32,7 @@ export function cleanTargets(files, ctx) {
   const rules = REBUILT[ctx.kind] || [];
   for (const f of files) {
     const name = f.path.split('/').pop();
-    if (rules.some((r) => r.test(f.path))) remove.push({ ...f, why: 'rebuilt on the next render' });
+    if (f.path === 'assets/check-moments.jpg' || rules.some((r) => r.test(f.path))) remove.push({ ...f, why: 'rebuilt on the next render' });
     else if (/^renders\/[^/]+\.mp4$/.test(f.path) && ctx.delivered.has(name)) remove.push({ ...f, why: 'already in the outbox' });
     else if (ctx.kind === 'edit' && f.path === 'assets/raw.mp4') {
       if (!ctx.settled) notes.push('working copy kept (still being edited)');

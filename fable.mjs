@@ -13,6 +13,7 @@
 //       Written captions on a clip, each at its own time (emoji, title cards, accent words); nothing is
 //       transcribed or cut. The lines come from <video name>.captions.txt beside the video, or --lines.
 //   node fable.mjs watch [--every 5] [--once]       24/7: edit every new video that lands in inbox/
+//   node fable.mjs check <slug|video.mp4>            the draft check on its own: sound, black frames, text against the app buttons and the face
 //   node fable.mjs status
 //   node fable.mjs clean [slug] [--apply] [--days 3] [--all]  what finished or idle projects can give back; deletes only with --apply
 //   node fable.mjs review <slug|draft.mp4> [--dry-run]  opt-in: Gemini watches the draft, notes to outbox/<slug>-review.md
@@ -29,7 +30,8 @@ import { freemem, tmpdir, totalmem } from 'node:os';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { captionLayout, hasFastFonts, renderFast, reviewSheets } from './tools/fast-render.mjs';
+import { captionLayout, hasFastFonts, renderFast, reviewSheets, textBoxes } from './tools/fast-render.mjs';
+import { checkFindings, checkLines, parseDetect, verdict } from './tools/check.mjs';
 import { alignScript, hookFromScript } from './tools/script-align.mjs';
 import { isOutput, orderClips, parseBrief, stitchFrame, wrapCaption } from './tools/stitch.mjs';
 import { captionCenter, parseCaptionScript } from './tools/caption-script.mjs';
@@ -58,7 +60,7 @@ const { values: opt, positionals } = parseArgs({
     engine: { type: 'string', default: 'fast' },
     script: { type: 'string' }, tag: { type: 'string' }, caption: { type: 'string' }, final: { type: 'boolean' },
     sub: { type: 'string', multiple: true }, lines: { type: 'string' },
-    apply: { type: 'boolean' }, days: { type: 'string', default: '3' }, all: { type: 'boolean' },
+    apply: { type: 'boolean' }, 'no-check': { type: 'boolean' }, days: { type: 'string', default: '3' }, all: { type: 'boolean' },
     'dry-run': { type: 'boolean' }, model: { type: 'string' },
   },
 });
@@ -991,6 +993,76 @@ function prepareBroll(dir, broll, lay) {
   return files;
 }
 
+// ---------- draft check: the finished file, start to end ----------
+// One decode gives the black frames, a frozen ending, the loudness, and a tiny 2 fps copy that the
+// face tracker reads, so the face is measured as it is in the finished video (zooms and all).
+function measureDraft(video, work) {
+  mkdirSync(work, { recursive: true });
+  const info = JSON.parse(run('ffprobe', ['-v', 'error', '-show_entries', 'stream=codec_type,width,height,duration,r_frame_rate:format=duration', '-of', 'json', video]));
+  const v = info.streams.find((x) => x.codec_type === 'video'), a = info.streams.find((x) => x.codec_type === 'audio');
+  if (!v) throw new Error('no video stream');
+  const [fn, fd] = String(v.r_frame_rate || '30/1').split('/').map(Number);
+  const probed = { width: v.width, height: v.height, duration: Number(info.format.duration), fps: fd ? fn / fd : fn || FPS, hasAudio: Boolean(a), audioDuration: a && Number(a.duration) ? Number(a.duration) : null };
+  const proxy = join(work, 'check-proxy.mp4'), faceJson = join(work, 'check-face.json');
+  const r = spawnSync('ffmpeg', ['-hide_banner', '-nostats', '-y', '-i', video,
+    '-filter_complex', '[0:v]scale=360:-2,split[a][b];[a]blackdetect=d=0.2:pix_th=0.10,freezedetect=n=-50dB:d=1.5[d];[b]fps=2[p]',
+    '-map', '[d]', ...(a ? ['-map', '0:a:0', '-af', 'ebur128=peak=true:framelog=quiet'] : []), '-f', 'null', '-',
+    '-map', '[p]', '-an', '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '30', proxy], { encoding: 'utf8', maxBuffer: 1 << 26, windowsHide: true });
+  if (r.status !== 0) throw new Error(`could not read ${basename(video)}: ${(r.stderr || '').trim().split('\n').pop()}`);
+  let faces = null;
+  try { run('python', [join(root, 'tools/track_face.py'), proxy, faceJson]); faces = JSON.parse(readFileSync(faceJson, 'utf8')).timeline || []; } catch {}
+  for (const f of [proxy, faceJson]) rmSync(f, { force: true });
+  return { probe: probed, ...parseDetect(r.stderr || ''), faces };
+}
+// boxes: where the build put its text (null for a video Fable did not build). Returns the findings,
+// the notes lines, and a sheet of the moments that need a look. Never stops a render: a check
+// that cannot run says so in one line.
+function draftCheck(video, { boxes = null, work, label = '' } = {}) {
+  if (opt['no-check']) return null;
+  try {
+    const started = Date.now();
+    const m = measureDraft(video, work);
+    const findings = checkFindings({ ...m, boxes });
+    const at = [...new Set(findings.filter((f) => f.level !== 'ok').flatMap((f) => f.at || []).map((t) => Math.round(Math.min(Math.max(0, t), m.probe.duration - 0.05) * m.probe.fps)))].slice(0, 12).sort((x, y) => x - y);
+    let sheet = null;
+    if (at.length) {
+      const file = join(work, 'check-moments.jpg'), cols = Math.min(6, at.length);
+      try { ff(['-i', video, '-vf', `select='${at.map((n) => `eq(n\\,${n})`).join('+')}',scale=${m.probe.height > m.probe.width ? 360 : 640}:-2,tile=${cols}x${Math.ceil(at.length / cols)}`, '-fps_mode', 'vfr', '-frames:v', '1', '-update', '1', '-q:v', '4', file]); sheet = file; } catch {}
+    } else rmSync(join(work, 'check-moments.jpg'), { force: true });
+    const v = verdict(findings);
+    log(`check${label ? ` (${label})` : ''}: ${v.line} (${Math.round((Date.now() - started) / 100) / 10} s)`);
+    for (const f of findings.filter((x) => x.level === 'fix')) log(`  fix: ${f.text}`);
+    const shown = sheet ? sheet.slice(root.length + 1).replace(/\\/g, '/') : null;
+    return { findings, verdict: v, sheet, lines: checkLines(findings, shown) };
+  } catch (e) { log(`check skipped: ${e.message.split('\n')[0]}`); return null; }
+}
+// `check <slug>` takes the newest draft or final of that project; `check <file.mp4>` any video.
+function checkCommand(target) {
+  const style = readStyle();
+  let video = existsSync(resolve(target)) && statSync(resolve(target)).isFile() ? resolve(target) : null;
+  const slug = video ? parse(video).name.replace(/[-_](final|v\d+)$/i, '') : target;
+  if (!video) {
+    const re = new RegExp(`^${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(-horizontal)?-(final|v\\d+)\\.mp4$`);
+    const found = outboxes(style).flatMap((d) => readdirSync(d).filter((f) => re.test(f)).map((f) => join(d, f))).map((f) => ({ f, t: statSync(f).mtimeMs })).sort((a, b) => b.t - a.t)[0];
+    if (!found) die(`no draft or final of "${slug}" in the outbox, and no file at ${resolve(target)}`);
+    video = found.f;
+  }
+  // Where the text sits, when a Fable build made this video.
+  const dir = join(projects, slug);
+  let boxes = null;
+  for (const [file, key] of [['assets/plan.json', 'boxes'], ['caption.json', 'boxes'], ['stitch.json', 'boxes']]) {
+    try { const b = JSON.parse(readFileSync(join(dir, file), 'utf8'))[key]; if (Array.isArray(b)) { boxes = b; break; } } catch {}
+  }
+  const work = existsSync(dir) ? join(dir, 'assets') : join(root, '.fable', 'check');
+  log(`checking ${basename(video)}${boxes ? '' : ' (not a Fable build, or built before the check existed: text positions unknown)'}`);
+  opt['no-check'] = false;
+  const c = draftCheck(video, { boxes, work });
+  if (!c) die('the check could not run');
+  const out = deliver(`${slug}-check.md`, style, (p) => writeFileSync(p, [`# ${slug}: draft check`, '', `Video: ${basename(video)}`, '', ...c.lines].join('\n')));
+  console.log('\n' + c.lines.join('\n'));
+  log(`saved: ${out}`);
+}
+
 // ---------- the pipeline ----------
 // Counts versions in every outbox folder, so a v3 never overwrites a v1 kept on Drive.
 function nextVersion(slug, suffix, style) {
@@ -1048,6 +1120,7 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   const savePlan = () => writeFileSync(join(dir, 'assets/plan.json'), JSON.stringify({ ...plan, style }, null, 2));
   savePlan();
   const outputs = [], renders = [];
+  let checkNotes = null;
   for (const fmt of formats) {
     const lay = layoutFor(fmt, src);
     plan.broll = prepareBroll(dir, broll, lay);
@@ -1095,12 +1168,18 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
     if (style.saveTo && saved.startsWith(resolve(style.saveTo))) log(`saved to ${saved}`);
     const mirrored = mirror(saved, style);
     if (mirrored) log(`copied to ${mirrored}`);
-    if (fmt === formats[0]) { try { plan.review = reviewSheets(dir, rendered, plan, ff); } catch (e) { log(`review sheets skipped: ${e.message.split('\n')[0]}`); } }
+    if (fmt === formats[0]) {
+      try { plan.review = reviewSheets(dir, rendered, plan, ff); } catch (e) { log(`review sheets skipped: ${e.message.split('\n')[0]}`); }
+      // The draft check reads the finished file. A hand-edited page may put text anywhere, so its positions are not assumed.
+      plan.boxes = plan.handEdited?.includes(file) && useBrowser ? null : textBoxes(plan, lay, style);
+      const c = draftCheck(rendered, { boxes: plan.boxes, work: join(dir, 'assets') });
+      if (c) { plan.check = { ...c.verdict, findings: c.findings }; checkNotes = c.lines; }
+    }
   }
   plan.renders = renders;
   savePlan();
   cleanup(dir);
-  return { plan, style, outputs, mixInfo, broll, renders };
+  return { plan, style, outputs, mixInfo, broll, renders, checkNotes };
 }
 
 function notes(dir, edit, result, suggestions) {
@@ -1151,6 +1230,7 @@ function notes(dir, edit, result, suggestions) {
     for (const s of suggestions) lines.push(`- ${fmt(s.start)}-${fmt(s.end)} (source time), ${s.kind}: ${s.reason}. ${s.why[0].toUpperCase()}${s.why.slice(1)}.`);
     lines.push('');
   }
+  if (result.checkNotes) lines.push(...result.checkNotes);
   lines.push('## Give notes', '', 'Say what to change in plain words ("faster", "captions lower", "cut the part about X", "approved").',
     'Your agent edits edit.json (segments are source-time in/out points; fixes change or drop a word by its number; hook and style override my-style.md) and rebuilds.', '');
   if (style.copyTo) lines.splice(lines.indexOf('## Give notes'), 0, `Copies of the drafts and these notes go to ${style.copyTo}.`, '');
@@ -1372,9 +1452,13 @@ function stitch(folder) {
   const picks = order.map((c) => { const at = t + c.duration / 2; t += c.duration; return Math.round(at * fps); });
   try { ff(['-i', rendered, '-vf', `select='${picks.map((n) => `eq(n\\,${n})`).join('+')}',scale=360:-2,tile=${order.length}x1`, '-frames:v', '1', '-update', '1', 'assets/review-shots.png'], dir); } catch {}
 
+  // Where the caption sits, for the draft check.
+  const boxes = [];
+  if (lines.length) { const bh = lines.length * size + (lines.length - 1) * Math.round(size * 0.22), top = Math.min(H * 0.6 - bh / 2, H * 0.85 - bh), bw = Math.min(W * 0.92, longest * size * 0.64); boxes.push({ kind: 'caption', text: lines.join(' '), start: 0, end: total, x0: Math.round((W - bw) / 2), x1: Math.round((W + bw) / 2), y0: Math.round(top), y1: Math.round(top + bh) }); }
+  const check = draftCheck(rendered, { boxes, work: join(dir, 'assets') });
   const out = deliver(outName, style, (p) => copyFileSync(rendered, p));
   rmSync(rendered, { force: true }); // one copy only: the laptop is short on disk
-  writeFileSync(join(dir, 'stitch.json'), JSON.stringify({ slug, source: src, brief: briefFile || null, order: order.map((c) => c.name), by, caption: caption || null, subs, tag, frame: `${W}x${H}`, fps, duration: r3(total) }, null, 2) + '\n');
+  writeFileSync(join(dir, 'stitch.json'), JSON.stringify({ slug, source: src, brief: briefFile || null, order: order.map((c) => c.name), by, caption: caption || null, subs, tag, frame: `${W}x${H}`, fps, duration: r3(total), boxes }, null, 2) + '\n');
   const notesPath = deliver(`${slug}-notes.md`, style, (p) => writeFileSync(p, [
     `# ${slug}`, '',
     `${final ? 'Final' : 'Draft'}: ${basename(out)} (${W}x${H}, ${r3(total)} s, H.264/AAC)`,
@@ -1388,6 +1472,7 @@ function stitch(folder) {
     ...subs.map((s) => `- Subtitle under the caption, ${s.start}-${s.end} s: "${s.text}".`),
     tag ? `- House rule: "${tag}" tag top right on every frame.` : '- No AI tag (nothing says the clips are AI-made; add --tag AI-generated if they are).',
     '- Nothing left the computer: no transcription, no uploads.', '',
+    ...(check ? check.lines : []),
     '## Check', '',
     `- fable/video-projects/${slug}/assets/review-shots.png: one frame per clip, for order and caption placement.`,
     briefFile && /upload|save (it )?back|drive folder/i.test(text(briefFile)) ? '- The brief asks for the video to be saved back to its folder. Fable never uploads on its own; your agent copies it there when you say so.' : null,
@@ -1487,10 +1572,13 @@ function captionVideo(target) {
   const cols = Math.min(8, picks.length);
   try { ff(['-i', outName, '-vf', `select='${picks.map((n) => `eq(n\\,${n})`).join('+')}',scale=${H > W ? 270 : 480}:-2,tile=${cols}x${Math.ceil(picks.length / cols)}`, '-fps_mode', 'vfr', '-frames:v', '1', '-update', '1', 'assets/review-shots.png'], dir); } catch (e) { log(`review sheet skipped: ${e.message.split('\n')[0]}`); }
 
+  // Where each card sits (inside its padding), for the draft check.
+  const boxes = placed.map((p, j) => { const c = script.captions[j]; return { kind: c ? 'caption' : 'tag', text: c ? c.lines.join(' ') : tag, start: c ? c.start : 0, end: c ? c.end : duration, x0: p.x + 12, y0: p.y + 12, x1: p.x + p.w - 12, y1: p.y + p.h - 12 - Math.round(p.size * 0.25) }; });
+  const check = draftCheck(rendered, { boxes, work: join(dir, 'assets') });
   const out = deliver(outName, style, (p) => copyFileSync(rendered, p));
   rmSync(rendered, { force: true }); // one copy only: the laptop is short on disk
   rmSync(join(dir, 'assets/caption.filter'), { force: true });
-  writeFileSync(join(dir, 'caption.json'), JSON.stringify({ slug, source, lines: 'captions.txt', trim: script.trim, position: script.position, center: r3(center), tag, frame: `${W}x${H}`, duration, captions: script.captions }, null, 2) + '\n');
+  writeFileSync(join(dir, 'caption.json'), JSON.stringify({ slug, source, lines: 'captions.txt', trim: script.trim, position: script.position, center: r3(center), tag, frame: `${W}x${H}`, duration, captions: script.captions, boxes }, null, 2) + '\n');
   const notesPath = deliver(`${slug}-notes.md`, style, (p) => writeFileSync(p, [
     `# ${slug}`, '',
     `${final ? 'Final' : 'Draft'}: ${basename(out)} (${W}x${H}, ${duration} s, H.264/AAC, rendered in ${took} s)`,
@@ -1505,6 +1593,7 @@ function captionVideo(target) {
     tag ? `- House rule: "${tag}" tag top right on every frame.` : '- No AI tag added (pass --tag AI-generated, or a "tag:" line, if the footage is AI-made and does not already show one).',
     '- Nothing left the computer.', '',
     ...(script.warnings.length ? ['## Look at these', '', ...script.warnings.map((w) => `- ${w}`), ''] : []),
+    ...(check ? check.lines : []),
     '## Check', '',
     `- fable/video-projects/${slug}/assets/review-shots.png: one frame per caption, to check each line against its shot.`,
     final ? null : `- Approved? \`node fable.mjs caption ${slug} --final\` writes ${slug}-final.mp4.`,
@@ -1637,6 +1726,7 @@ if (isMain) {
     case 'caption': if (!target) die('usage: node fable.mjs caption <video|slug> [--lines captions.txt]'); captionVideo(target); break;
     case 'watch': watch(); break;
     case 'status': status(); break;
+    case 'check': if (!target) die('usage: node fable.mjs check <slug|video.mp4>'); checkCommand(target); break;
     case 'clean': cleanDisk(); break;
     case 'review': {
       if (!target) die('usage: node fable.mjs review <slug|draft.mp4> [--dry-run]');
@@ -1646,7 +1736,7 @@ if (isMain) {
       break;
     }
     default:
-      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 19).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 20).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(command ? 1 : 0);
   }
 }

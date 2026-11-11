@@ -14,6 +14,7 @@
 //       transcribed or cut. The lines come from <video name>.captions.txt beside the video, or --lines.
 //   node fable.mjs watch [--every 5] [--once]       24/7: edit every new video that lands in inbox/
 //   node fable.mjs status
+//   node fable.mjs clean [slug] [--apply] [--days 3] [--all]  what finished or idle projects can give back; deletes only with --apply
 //   node fable.mjs review <slug|draft.mp4> [--dry-run]  opt-in: Gemini watches the draft, notes to outbox/<slug>-review.md
 //   --engine fast|browser   fast (default): FFmpeg + libass, seconds. browser: HyperFrames + Chrome, minutes.
 //
@@ -22,7 +23,7 @@
 // Otherwise nothing is sent anywhere (HyperFrames telemetry and update checks are switched off).
 // Style comes from my-style.md; rules from my-rules.md.
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statfsSync, statSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { freemem, tmpdir, totalmem } from 'node:os';
 import { basename, dirname, extname, join, parse, resolve } from 'node:path';
@@ -33,6 +34,7 @@ import { alignScript, hookFromScript } from './tools/script-align.mjs';
 import { isOutput, orderClips, parseBrief, stitchFrame, wrapCaption } from './tools/stitch.mjs';
 import { captionCenter, parseCaptionScript } from './tools/caption-script.mjs';
 import { planMotion } from './tools/motion.mjs';
+import { cleanTargets, mb, projectKind } from './tools/clean.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -56,6 +58,7 @@ const { values: opt, positionals } = parseArgs({
     engine: { type: 'string', default: 'fast' },
     script: { type: 'string' }, tag: { type: 'string' }, caption: { type: 'string' }, final: { type: 'boolean' },
     sub: { type: 'string', multiple: true }, lines: { type: 'string' },
+    apply: { type: 'boolean' }, days: { type: 'string', default: '3' }, all: { type: 'boolean' },
     'dry-run': { type: 'boolean' }, model: { type: 'string' },
   },
 });
@@ -116,9 +119,19 @@ const outboxes = (style) => [...new Set([style?.saveTo, outbox].filter(Boolean).
 // GPU encoder first, and a warning before each render naming what is eating the memory.
 const GB = 1024 ** 3;
 const lowMemoryMachine = () => totalmem() <= 8.5 * GB;
+// Disk, not memory, is what stops a render first on a full laptop. Say so before it happens.
+const diskFree = (dir = root) => { try { const s = statfsSync(dir); return s.bavail * s.bsize; } catch { return null; } };
+let diskWarned = false;
+function diskCheck() {
+  const free = diskFree();
+  if (free === null || free >= 1.5 * GB || diskWarned) return free;
+  diskWarned = true;
+  log(`disk: only ${mb(free)} free. A render can fail when this runs out. See what can go with: node fable.mjs clean`);
+  return free;
+}
 function memoryCheck() {
   const free = freemem() / GB;
-  if (free >= 1.5) return { free: Math.round(free * 10) / 10, hogs: [] };
+  if (free >= 1.5) { diskCheck(); return { free: Math.round(free * 10) / 10, hogs: [] }; }
   let hogs = [];
   try {
     if (win) {
@@ -129,6 +142,7 @@ function memoryCheck() {
       hogs = out.trim().split(/\n/).filter(Boolean).map((l) => { const [kb, ...c] = l.trim().split(/\s+/); return `${c.join(' ')} ${Math.round(kb / 1024)} MB`; });
     }
   } catch {}
+  diskCheck();
   log(`memory: ${(free * 1024).toFixed(0)} MB free. Taking the light path. Biggest: ${hogs.join(', ') || 'unknown'}. Close what you can for better quality.`);
   return { free: Math.round(free * 10) / 10, hogs };
 }
@@ -1000,6 +1014,7 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   const src = edit.source;
   const style = { ...readStyle({ vertical: src.height > src.width, duration: src.duration }), ...(edit.style || {}) };
   validateEdit(edit);
+  restoreRaw(dir, edit);
   const tl = timeline(edit.segments, raw.words || [], edit.fixes || {}, edit.extra || []);
   if (tl.dropped.length) log(`${tl.dropped.length} transcript word${tl.dropped.length > 1 ? 's' : ''} fell inside cuts: ${tl.dropped.map((d) => `"${d.text}"@${d.at}s`).join(', ')}`);
   const scriptFile = edit.script?.file && [join(dirname(edit.source.file), edit.script.file)].find((p) => existsSync(p));
@@ -1145,6 +1160,29 @@ function notes(dir, edit, result, suggestions) {
 }
 const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${(s % 60).toFixed(2).padStart(5, '0')}`;
 
+// One normalized copy to cut from: constant 30 fps, rotation baked in, at most 1920 on the long side.
+// The same source always gives the same copy, which is why `clean` may remove it: build() makes it
+// again from the original when it is missing.
+function normalize(source, dir, info = probe(source)) {
+  const long = Math.max(info.width, info.height), k = Math.min(1, 1920 / long);
+  const tw = Math.round(info.width * k / 2) * 2, th = Math.round(info.height * k / 2) * 2;
+  const audioArgs = info.hasAudio ? ['-map', '0:a:0', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'] : ['-an'];
+  log(`normalizing to ${tw}x${th} @ ${FPS} fps`);
+  mkdirSync(join(dir, 'assets'), { recursive: true });
+  ff(['-i', source, '-map', '0:v:0', ...audioArgs, '-vf', `scale=${tw}:${th}:flags=lanczos`, '-r', String(FPS), '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', join(dir, 'assets/raw.mp4')]);
+  return probe(join(dir, 'assets/raw.mp4'));
+}
+// A cleaned project has no working copy. Bring it back from the original before anything is cut.
+function restoreRaw(dir, edit) {
+  if (existsSync(join(dir, 'assets/raw.mp4'))) return;
+  const source = edit.source?.file;
+  if (!source || !existsSync(source)) die(`${edit.slug}: the working copy was cleaned and the original video is not at ${source || '(unknown)'}. Put the original back there and run this again.`);
+  log(`${edit.slug} was cleaned; copying the original in again`);
+  const norm = normalize(source, dir);
+  if (Math.abs(norm.duration - edit.source.duration) > 0.2) log(`the original is now ${norm.duration.toFixed(1)} s, it was ${edit.source.duration.toFixed(1)} s when this was edited: check the cut, the file may have been replaced`);
+  for (const d of ['assets/sfx', 'compositions', 'renders']) mkdirSync(join(dir, d), { recursive: true });
+}
+
 async function edit(video) {
   const source = resolve(video);
   if (!existsSync(source)) die(`not found: ${source}`);
@@ -1154,13 +1192,7 @@ async function edit(video) {
   const style = readStyle({ vertical: info.height > info.width, duration: info.duration });
   const lay = layoutFor(style.format === 'both' ? 'vertical' : style.format, info);
   const dir = newProject(slug, lay);
-  // One normalized copy to cut from: constant 30 fps, rotation baked in, at most 1920 on the long side.
-  const long = Math.max(info.width, info.height), k = Math.min(1, 1920 / long);
-  const tw = Math.round(info.width * k / 2) * 2, th = Math.round(info.height * k / 2) * 2;
-  const audioArgs = info.hasAudio ? ['-map', '0:a:0', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-ac', '2'] : ['-an'];
-  log(`normalizing to ${tw}x${th} @ ${FPS} fps`);
-  ff(['-i', source, '-map', '0:v:0', ...audioArgs, '-vf', `scale=${tw}:${th}:flags=lanczos`, '-r', String(FPS), '-fps_mode', 'cfr', '-c:v', 'libx264', '-preset', 'fast', '-crf', '20', '-pix_fmt', 'yuv420p', '-movflags', '+faststart', join(dir, 'assets/raw.mp4')]);
-  const norm = probe(join(dir, 'assets/raw.mp4'));
+  const norm = normalize(source, dir, info);
   // A file that is still copying, or stopped copying, has a full header and a short body.
   if (info.duration - norm.duration > 1.0) {
     rmSync(dir, { recursive: true, force: true });
@@ -1537,6 +1569,62 @@ function status() {
   }
 }
 
+// ---------- clean: give the disk back ----------
+// Finished projects (a final is in an outbox) and projects idle for --days give back everything a
+// rebuild writes again, plus the working copy while the original video still exists. Projects in
+// use, hand-built projects, originals in inbox/, and everything in the outbox are never touched.
+// Prints the report and deletes nothing unless --apply is given.
+function cleanDisk() {
+  const style = readStyle();
+  const delivered = new Set(outboxes(style).flatMap((d) => readdirSync(d)));
+  const days = Math.max(0, Number(opt.days) || 0), now = Date.now();
+  const walk = (dir, rel = '') => readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const p = join(dir, e.name), r = rel ? `${rel}/${e.name}` : e.name;
+    if (e.isDirectory()) return walk(p, r);
+    try { const st = statSync(p); return [{ path: r, size: st.size, mtime: st.mtimeMs }]; } catch { return []; }
+  });
+  const rows = [];
+  let total = 0, freed = 0;
+  for (const slug of existsSync(projects) ? readdirSync(projects) : []) {
+    const dir = join(projects, slug);
+    if (!statSync(dir).isDirectory() || (target && slug !== target)) continue; // `clean <slug>` looks at one project
+    const files = walk(dir), size = files.reduce((a, f) => a + f.size, 0);
+    total += size;
+    const kind = projectKind(readdirSync(dir));
+    const idle = files.length ? (now - Math.max(...files.map((f) => f.mtime))) / 86400000 : Infinity;
+    const done = delivered.has(`${slug}-final.mp4`) || delivered.has(`${slug}-horizontal-final.mp4`);
+    const settled = done || idle >= days;
+    let sourceExists = false;
+    if (kind === 'edit') { try { sourceExists = existsSync(JSON.parse(readFileSync(join(dir, 'edit.json'), 'utf8')).source?.file || ''); } catch {} }
+    const plan = settled || opt.all ? cleanTargets(files, { kind, delivered, sourceExists, settled }) : { remove: [], notes: [`in use (changed ${idle < 1 ? 'today' : `${Math.floor(idle)} day${Math.floor(idle) === 1 ? '' : 's'} ago`}); --all includes it`] };
+    const gain = plan.remove.reduce((a, f) => a + f.size, 0);
+    freed += gain;
+    rows.push({ slug, dir, size, gain, plan, state: done ? 'final' : kind === 'hand' ? 'hand-built' : `idle ${Math.floor(idle)}d` });
+  }
+  // The browser renderer's leftovers in the temp folder go too; nothing reads them twice.
+  const temps = readdirSync(tmpdir()).filter((d) => /^hyperframes-(extract-cache|kit-test|render)/.test(d)).map((d) => join(tmpdir(), d));
+  const tempSize = temps.reduce((a, d) => { try { return a + (statSync(d).isDirectory() ? walk(d).reduce((x, f) => x + f.size, 0) : statSync(d).size); } catch { return a; } }, 0);
+  freed += tempSize;
+
+  rows.sort((a, b) => b.gain - a.gain || b.size - a.size);
+  const before = diskFree();
+  console.log(`Fable projects: ${mb(total)} in ${rows.length} folders. Disk free: ${before === null ? 'unknown' : mb(before)}.\n`);
+  for (const r of rows) {
+    if (!r.gain && !opt.all && r.size < 20 * 1024 ** 2) continue; // small and nothing to give: not worth a line
+    console.log(`${r.gain ? `frees ${mb(r.gain).padStart(7)}` : '      nothing'}  of ${mb(r.size).padStart(7)}  ${r.slug} (${r.state})${r.plan.notes.length ? `: ${r.plan.notes.join('; ')}` : ''}`);
+  }
+  if (tempSize) console.log(`frees ${mb(tempSize).padStart(7)}  browser renderer leftovers in the temp folder`);
+  const dirSize = (d) => existsSync(d) ? walk(d).reduce((a, f) => a + f.size, 0) : 0;
+  console.log(`\nNot touched, yours to decide: inbox/ originals ${mb(dirSize(inbox))}, local outbox/ ${mb(dirSize(outbox))}.`);
+  if (!freed) return log('nothing to clean right now');
+  if (!opt.apply) return log(`this would free ${mb(freed)}. Nothing was deleted. To do it: node fable.mjs clean --apply`);
+  let gone = 0, failed = 0;
+  for (const r of rows) for (const f of r.plan.remove) { try { rmSync(join(r.dir, f.path), { force: true }); gone += f.size; } catch { failed++; } }
+  for (const d of temps) { try { rmSync(d, { recursive: true, force: true }); } catch { failed++; } }
+  const after = diskFree();
+  log(`cleaned: ${mb(gone + tempSize)} given back${failed ? ` (${failed} files were in use and stayed)` : ''}. Disk free: ${after === null ? 'unknown' : mb(after)}. Every project still rebuilds: node fable.mjs rebuild <slug>`);
+}
+
 export { planCuts, timeline, buildCaptions, hookCandidates, chooseHook, hookGate, insideSilence, untranscribed, layoutFor, readStyle, ruleApplies };
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
@@ -1549,6 +1637,7 @@ if (isMain) {
     case 'caption': if (!target) die('usage: node fable.mjs caption <video|slug> [--lines captions.txt]'); captionVideo(target); break;
     case 'watch': watch(); break;
     case 'status': status(); break;
+    case 'clean': cleanDisk(); break;
     case 'review': {
       if (!target) die('usage: node fable.mjs review <slug|draft.mp4> [--dry-run]');
       try { process.loadEnvFile(join(root, '.env')); } catch {}
@@ -1557,7 +1646,7 @@ if (isMain) {
       break;
     }
     default:
-      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 18).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 19).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(command ? 1 : 0);
   }
 }

@@ -100,6 +100,7 @@ YouTube and it gets its own framing and text placement.
 | Learning | Your notes are saved as rules in `my-rules.md` and applied every time; a rule can be scoped with `[9:16]`, `[16:9]`, `[<90s]`, or `[>90s]` |
 | Share | A `Copy to: <folder>` rule mirrors every draft, final, and notes file to a synced Drive folder or shared drive |
 | Motion | With "Graphics: some" (or heavy) in your style, drafts get punch-in zooms on the lines that carry weight, number callouts ("24 DAYS") and step labels for counted lists, all planned from your own words and drawn by FFmpeg in seconds |
+| Clean | `node fable.mjs clean` shows what finished and idle projects can give back (cut footage, mixes, the working copy while the original exists) and deletes only with `--apply`; every project still rebuilds afterwards |
 | Caption | `node fable.mjs caption <video>` puts written captions on a clip, each at its own time, from `<video name>.captions.txt`: color emoji, title cards, accent words, placed under the measured face; nothing transcribed or cut |
 | Stitch | `node fable.mjs stitch <folder>` joins finished clips (an AI short, a brief) with hard cuts, their own audio, one fixed caption, and the AI tag; nothing re-timed |
 | 24/7 | `node fable.mjs watch` edits everything that lands in the inbox |

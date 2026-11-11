@@ -14,7 +14,7 @@ editing or coding terms. Run every command from the repo root unless a step says
 | Path | What it is |
 | --- | --- |
 | `setup.mjs` | One-time setup. Safe to re-run. |
-| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `watch`, `status`, `review`. |
+| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `watch`, `status`, `clean`, `review`. |
 | `tools/transcribe.mjs` | Free word-level transcription (Groq, or `--local` faster-whisper). |
 | `tools/review.mjs` | Opt-in draft review by Gemini (`node fable.mjs review <slug>`). |
 | `inbox/` | Raw videos the user wants edited. |
@@ -267,6 +267,20 @@ Tell the user to keep that terminal open; closing it stops the watcher. When the
 with notes on a watched draft, continue from "Notes become rules" using the slug in the
 notes file.
 
+## Disk: "clean up", "free space", a render that fails on a full disk
+
+`node fable.mjs clean` prints what finished projects (a final is in the outbox) and projects idle
+for three days can give back, and deletes nothing. Show the user the total, then run it again
+with `--apply` on their yes. It removes only what the next rebuild writes anyway (cut footage,
+voice, mix, review sheets, the proxy, renders already in the outbox) and the working copy
+`raw.mp4`, and that last one only while the original video is still where it was: a later
+`rebuild` or `final` copies it in again on its own, same cut. Decisions (`edit.json`, transcript,
+plan, hand-edited `index.html`, B-roll downloads) always stay. Never touched: projects changed in
+the last three days (`--days N` changes that, `--all` includes them but keeps their working
+copy), hand-built projects, `inbox/`, and every outbox. `clean <slug>` looks at one project.
+Fable warns before a render when less than 1.5 GB is free. Originals in `inbox/` are the user's
+to delete; if they do, a cleaned project can no longer be rebuilt, so say that first.
+
 ## Small computers (8 GB of memory or less)
 
 Fable detects this and takes the light path on its own: the GPU encoder first for footage and
@@ -274,8 +288,8 @@ finals, a memory check before each render that names the apps holding the most m
 drafts in seconds. Tell the user, once, that closing the browser and other apps before a final
 gives the best quality, and that the Chrome renderer (`--engine browser`) runs single-worker on
 this hardware and is for motion-graphics specials only. Keep transcription on Groq when a key
-exists; local Whisper medium would take half the memory. Keep `fable/video-projects` trimmed:
-disk, not memory, is what stops a render first.
+exists; local Whisper medium would take half the memory. Keep `fable/video-projects` trimmed
+with `node fable.mjs clean`: disk, not memory, is what stops a render first.
 
 ## Never
 

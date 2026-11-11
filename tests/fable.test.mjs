@@ -252,3 +252,34 @@ test('motion in the fast renderer: a callout replaces the word captions under it
   assert.equal(lines.filter((l) => /,Step,/.test(l) && /RULE 1$/.test(l) && /\move/.test(l)).length, 1);
   assert.equal(lines.filter((l) => /,Word,/.test(l)).length, 2); // FOR and THEN; 24 and DAYS are the callout
 });
+
+test('clean: only what a rebuild writes again goes; the working copy goes only while the original exists', async () => {
+  const { cleanTargets, projectKind } = await import('../tools/clean.mjs');
+  assert.equal(projectKind(['edit.json', 'assets']), 'edit');
+  assert.equal(projectKind(['caption.json', 'captions.txt']), 'caption');
+  assert.equal(projectKind(['stitch.json']), 'stitch');
+  assert.equal(projectKind(['build.py', 'assets']), 'hand');
+  const f = (path, size = 100) => ({ path, size });
+  const files = [f('edit.json'), f('index.html'), f('assets/raw.mp4', 5000), f('assets/raw.json'), f('assets/plan.json'), f('assets/face.json'),
+    f('assets/footage.mp4', 3000), f('assets/voice.wav'), f('assets/mix.wav'), f('assets/proxy.mp4'), f('assets/captions.ass'), f('assets/review-open.png'),
+    f('assets/sfx/pop.wav'), f('assets/fonts/Montserrat-Bold.ttf'), f('assets/broll/pexels-123.mp4'), f('assets/broll/b0-1080x1920.mp4'), f('assets/broll/ledger.json'),
+    f('renders/talk-v2.mp4'), f('renders/talk-final.mp4'), f('renders/archive/old.mp4'), f('assets/my-own-graphic.png')];
+  const delivered = new Set(['talk-final.mp4']);
+  const paths = (r) => r.remove.map((x) => x.path).sort();
+  const done = cleanTargets(files, { kind: 'edit', delivered, sourceExists: true, settled: true });
+  // Kept: every decision and measurement, the hand-edited page, B-roll downloads, a render that is
+  // not in the outbox, and files Fable does not recognize.
+  for (const keep of ['edit.json', 'index.html', 'assets/raw.json', 'assets/plan.json', 'assets/face.json', 'assets/broll/pexels-123.mp4', 'assets/broll/ledger.json', 'renders/talk-v2.mp4', 'renders/archive/old.mp4', 'assets/my-own-graphic.png']) assert.ok(!paths(done).includes(keep), keep);
+  for (const gone of ['assets/raw.mp4', 'assets/footage.mp4', 'assets/voice.wav', 'assets/mix.wav', 'assets/proxy.mp4', 'assets/captions.ass', 'assets/review-open.png', 'assets/sfx/pop.wav', 'assets/fonts/Montserrat-Bold.ttf', 'assets/broll/b0-1080x1920.mp4', 'renders/talk-final.mp4']) assert.ok(paths(done).includes(gone), gone);
+  // The original is gone: the working copy is the only copy, so it stays and the notes say why.
+  const orphan = cleanTargets(files, { kind: 'edit', delivered, sourceExists: false, settled: true });
+  assert.ok(!paths(orphan).includes('assets/raw.mp4') && /only copy/.test(orphan.notes.join(' ')));
+  // Still being edited (--all): the working copy stays so the next rebuild is not slowed down.
+  assert.ok(!paths(cleanTargets(files, { kind: 'edit', delivered, sourceExists: true, settled: false })).includes('assets/raw.mp4'));
+  // Hand-built projects are never touched, whatever is in them.
+  assert.deepEqual(cleanTargets(files, { kind: 'hand', delivered, sourceExists: true, settled: true }).remove, []);
+  // Caption and stitch projects give back their drawn cards and font copy, not their lines.
+  const cap = cleanTargets([f('caption.json'), f('captions.txt'), f('assets/cap00.png'), f('assets/tag.png'), f('assets/face.json'), f('assets/review-shots.png')], { kind: 'caption', delivered, settled: true });
+  assert.deepEqual(paths(cap), ['assets/cap00.png', 'assets/review-shots.png', 'assets/tag.png']);
+  assert.deepEqual(paths(cleanTargets([f('stitch.json'), f('assets/caption.ttf'), f('assets/caption.txt')], { kind: 'stitch', delivered, settled: true })), ['assets/caption.ttf']);
+});

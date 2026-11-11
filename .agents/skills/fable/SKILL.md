@@ -14,7 +14,7 @@ editing or coding terms. Run every command from the repo root unless a step says
 | Path | What it is |
 | --- | --- |
 | `setup.mjs` | One-time setup. Safe to re-run. |
-| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `post`, `check`, `watch`, `status`, `clean`, `review`. |
+| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `beats`, `post`, `check`, `watch`, `status`, `clean`, `review`. |
 | `tools/transcribe.mjs` | Free word-level transcription (Groq, or `--local` faster-whisper). |
 | `tools/review.mjs` | Opt-in draft review by Gemini (`node fable.mjs review <slug>`). |
 | `inbox/` | Raw videos the user wants edited. |
@@ -189,6 +189,8 @@ trim: 5-20.6             (optional: use only this part; caption times count from
 tag: AI-generated        (optional: only when the clip does not already show a tag)
 audio: mute              (optional: default keeps the clip's own sound)
 zoom: slow               (optional: a very slow push-in, for a static single take)
+keep: 0-2.1, 6.9-8, 20.6-23   (optional: a tighter cut, only these parts of the source, joined)
+beat: song.mp3           (optional: the music it goes out with; see "Music and the beat")
 
 0-1.3   [title] [serif] KA-VOGUE,
 1.3     ang laki ng next / water bill mo.
@@ -206,6 +208,34 @@ frame per caption) and fix what covers a face or a hand. To change a line, edit
 `fable/video-projects/<slug>/captions.txt` and run `node fable.mjs caption <slug>`; on approval
 add `--final`. Time each line to what the body or the shot is doing; that is where the joke lands.
 Needs Python with Pillow (`pip install pillow`).
+
+## Music and the beat: a dance clip, a montage, "cut it to the song", "make it 15 seconds"
+
+`node fable.mjs beats <song or video>` prints the tempo, where the beats fall, and a confidence
+(4 and up is a clear beat; under that the file is speech, ambience, or music without a steady
+pulse, and Fable will not move anything to it). It runs here, on FFmpeg; nothing is uploaded.
+
+In a captions file, `beat:` names the music the video goes out with: a sound or video file
+(beside the captions file, beside the video, or in `my-sounds/`), `own` for the clip's own sound,
+or a tempo like `116`. Then:
+
+- `keep:` parts start and end on a beat, each a whole number of beats long, so every cut lands
+  on the beat and every move inside a part stays on it while the song runs on underneath.
+- Caption times that are within 0.2 s of a beat move onto it. `@3` as a time means "when the third
+  kept part starts" (`@3+0.5` half a second in), which is how a montage is captioned: one line
+  per part.
+
+For a tighter cut of a clip made to music (an AI dance clip and the track it was generated to,
+a montage): watch the footage, pick the moments whose pose or action carries each line, write
+them as `keep:` ranges, name the reference track in `beat:`, and caption with `@1`, `@2`... Aim
+for whole bars (a multiple of four beats). The notes list each part's length in beats.
+
+The song itself is never put into the video: the user adds it in the app, where it is licensed,
+starting it with the video so the beats line up. Say that when you hand the draft over. If the
+reference track is a file the user gave you, use it only to find the beat.
+
+The built-in sound effects (tap, pop, click, ding, whoosh) are shaped tones made locally; files
+with those names in `my-sounds/` replace them.
 
 ## A script with the video
 

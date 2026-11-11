@@ -13,6 +13,7 @@
 //       Written captions on a clip, each at its own time (emoji, title cards, accent words); nothing is
 //       transcribed or cut. The lines come from <video name>.captions.txt beside the video, or --lines.
 //   node fable.mjs watch [--every 5] [--once]       24/7: edit every new video that lands in inbox/
+//   node fable.mjs beats <song or video>             the tempo and where the beats fall (for cutting and captioning to music)
 //   node fable.mjs post <slug|video.mp4> [--cover-at 12.5] [--title "Line one / line two"]   cover image and post sheet; made with every final
 //   node fable.mjs check <slug|video.mp4>            the draft check on its own: sound, black frames, text against the app buttons and the face
 //   node fable.mjs status
@@ -39,6 +40,7 @@ import { captionCenter, parseCaptionScript } from './tools/caption-script.mjs';
 import { planMotion } from './tools/motion.mjs';
 import { cleanTargets, mb, projectKind } from './tools/clean.mjs';
 import { coverCenter, postSheet, screenWords, sentences } from './tools/post.mjs';
+import { detectBeats, gridFromBpm, snapPieces, snapToBeat } from './tools/beats.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -738,11 +740,13 @@ function buildVoice(dir, segments, hasAudio, duration, style = {}) {
   ff(['-i', 'assets/raw.mp4', '-/filter_complex', script, '-map', '[voice]', '-ac', '2', '-ar', '48000', 'assets/voice.wav'], dir);
 }
 const SFX = {
-  tap: 'sine=f=150:d=0.18,afade=t=out:d=0.17:curve=exp,volume=1.6',
-  pop: 'sine=f=900:d=0.07,afade=t=out:d=0.065:curve=exp',
-  click: 'sine=f=2200:d=0.05,afade=t=out:d=0.045:curve=exp,volume=0.8',
+  // Shaped, not beeped: the tap is a soft kick (150 Hz falling to 60), the pop a quick rising
+  // bubble, the click a tick of bright noise, the ding a bell with two overtones.
+  tap: "aevalsrc='sin(2*PI*(60*t+3.2*(1-exp(-28*t))))*exp(-16*t)':d=0.3:s=48000,afade=t=out:st=0.22:d=0.08,volume=1.5",
+  pop: "aevalsrc='sin(2*PI*(500*t+2500*t*t))*exp(-45*t)':d=0.1:s=48000,afade=t=out:st=0.07:d=0.03",
+  click: 'anoisesrc=color=white:d=0.03:a=0.5,highpass=f=2500,afade=t=out:d=0.03:curve=exp',
   whoosh: 'anoisesrc=color=pink:d=0.5:a=0.6,highpass=f=250,lowpass=f=3500,afade=t=in:d=0.28:curve=qsin,afade=t=out:st=0.28:d=0.22',
-  ding: 'sine=f=1046:d=0.8,afade=t=out:d=0.78:curve=exp',
+  ding: "aevalsrc='(0.6*sin(2*PI*1046*t)+0.25*sin(2*PI*2093*t)+0.15*sin(2*PI*2887*t))*exp(-5*t)':d=0.9:s=48000,afade=t=out:st=0.7:d=0.2",
 };
 function userSounds() {
   const found = { music: null, sfx: {} };
@@ -1610,11 +1614,35 @@ function captionVideo(target) {
   if (resolve(scriptPath) !== resolve(kept)) writeFileSync(kept, text);
 
   const info = probe(source);
-  const script = parseCaptionScript(text, info.duration);
-  if (script.problems.length) die(`${basename(scriptPath)} has ${script.problems.length} problem${script.problems.length > 1 ? 's' : ''}:\n  ${script.problems.join('\n  ')}`);
-  const start = script.trim?.start || 0;
-  const duration = r3(Math.min(info.duration, script.trim?.end ?? Infinity) - start);
-  if (duration < 0.5) die(`trim ${script.trim.start}-${script.trim.end} leaves nothing of a ${info.duration.toFixed(1)} s video`);
+  const stop = (s) => { if (s.problems.length) die(`${basename(scriptPath)} has ${s.problems.length} problem${s.problems.length > 1 ? 's' : ''}:\n  ${s.problems.join('\n  ')}`); };
+  // First reading: which parts to keep and which music. Then the beat, the parts on it, and the
+  // captions on the joined timeline.
+  const first = parseCaptionScript(text, info.duration);
+  stop(first);
+  let grid = null, beatFrom = null;
+  if (first.beat) {
+    try {
+      if (first.beat.kind === 'bpm') { grid = gridFromBpm(first.beat.bpm, info.duration); beatFrom = `${first.beat.bpm} BPM as written`; }
+      else {
+        const f = first.beat.kind === 'own' ? source : [resolve(dirname(scriptPath), first.beat.file), resolve(dirname(source), first.beat.file), join(root, 'my-sounds', first.beat.file), resolve(first.beat.file)].find((p) => existsSync(p));
+        if (!f) die(`beat: cannot find ${first.beat.file} (looked beside the captions file, beside the video, and in my-sounds/)`);
+        grid = detectBeats(f); beatFrom = basename(f);
+      }
+    } catch (e) { die(`beat: ${e.message}`); }
+    if (grid.confidence !== null && grid.confidence < 4) { log(`beat: no clear beat in ${beatFrom} (confidence ${grid.confidence}); cuts and captions stay where you put them`); grid = null; }
+    else log(`beat: ${grid.bpm} BPM from ${beatFrom}, a beat every ${grid.period.toFixed(3)} s`);
+  }
+  // The kept parts. With a beat, each starts and ends on it (a whole video is left as it is).
+  const cut = first.keep.length > 0, chosen = cut || Boolean(first.trim);
+  const pieces = snapPieces(cut ? first.keep : [{ start: first.trim?.start || 0, end: Math.min(info.duration, first.trim?.end ?? Infinity) }], chosen ? grid : null, info.duration);
+  const start = pieces[0].src0;
+  const duration = r3(pieces.at(-1).out1);
+  if (duration < 0.5) die(`the kept parts leave nothing of a ${info.duration.toFixed(1)} s video`);
+  // On the joined timeline the beat runs from 0 when the parts were put on it; otherwise it is the source's beat, shifted.
+  const outGrid = grid ? { period: grid.period, first: chosen ? 0 : (((grid.first - start) % grid.period) + grid.period) % grid.period } : null;
+  const script = parseCaptionScript(text, info.duration, { pieces, snap: outGrid ? (t) => snapToBeat(t, outGrid, 0.2) : null });
+  stop(script);
+  const moved = outGrid ? script.captions.filter((c) => Math.abs((c.start - outGrid.first) / outGrid.period - Math.round((c.start - outGrid.first) / outGrid.period)) < 0.02 && c.start > 0).length : 0;
   const style = readStyle({ vertical: info.height > info.width, duration });
   const { w: W, h: H } = info.height > info.width * 1.2 ? { w: 1080, h: 1920 } : info.width > info.height * 1.2 ? { w: 1920, h: 1080 } : stitchFrame(info.width, info.height);
 
@@ -1646,13 +1674,24 @@ function captionVideo(target) {
     die(/No module named .PIL./.test(e.message) ? 'the caption cards need Pillow. Run: pip install pillow' : `could not draw the caption cards: ${e.message.split('\n').slice(-3).join(' ')}`);
   }
 
-  const inputs = ['-ss', String(start), '-t', String(duration + 0.2), '-i', source], chain = [];
+  // One part: seek to it. Several: cut each out of the source and join them, picture and sound.
+  const joined = pieces.length > 1;
+  const inputs = joined ? ['-i', source] : ['-ss', String(start), '-t', String(duration + 0.2), '-i', source], chain = [];
+  const base = joined ? '[cutv]' : '[0:v]';
+  if (joined) {
+    pieces.forEach((p, i) => chain.push(`[0:v]trim=start=${p.src0}:end=${p.src1},setpts=PTS-STARTPTS[kv${i}]`));
+    chain.push(`${pieces.map((_, i) => `[kv${i}]`).join('')}concat=n=${pieces.length}:v=1:a=0[cutv]`);
+    if (info.hasAudio && script.audio !== 'mute') {
+      pieces.forEach((p, i) => { const d = p.src1 - p.src0; chain.push(`[0:a]atrim=start=${p.src0}:end=${p.src1},asetpts=PTS-STARTPTS,afade=t=in:d=0.012,afade=t=out:st=${r3(Math.max(0, d - 0.015))}:d=0.015[ka${i}]`); });
+      chain.push(`${pieces.map((_, i) => `[ka${i}]`).join('')}concat=n=${pieces.length}:v=0:a=1[cuta]`);
+    }
+  }
   if (script.zoom) {
     // A very slow push-in so a static take never sits still. Drawn on a 2x copy so the move lands
     // on half pixels instead of stepping, and held on the face so it grows in place.
     const n = Math.round(duration * FPS), ax = face?.cx_median ?? 0.5, ay = face?.cy_median ?? 0.4;
-    chain.push(`[0:v]fps=${FPS},scale=${2 * W}:${2 * H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${2 * W}:${2 * H},setsar=1,zoompan=z='1+0.06*on/${Math.max(1, n - 1)}':x='(iw-iw/zoom)*${ax}':y='(ih-ih/zoom)*${ay}':d=1:s=${W}x${H}:fps=${FPS},format=yuv420p[b0]`);
-  } else chain.push(`[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H},setsar=1,fps=${FPS},format=yuv420p[b0]`);
+    chain.push(`${base}fps=${FPS},scale=${2 * W}:${2 * H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${2 * W}:${2 * H},setsar=1,zoompan=z='1+0.06*on/${Math.max(1, n - 1)}':x='(iw-iw/zoom)*${ax}':y='(ih-ih/zoom)*${ay}':d=1:s=${W}x${H}:fps=${FPS},format=yuv420p[b0]`);
+  } else chain.push(`${base}scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H},setsar=1,fps=${FPS},format=yuv420p[b0]`);
   placed.forEach((p, j) => {
     inputs.push('-i', p.file);
     const c = script.captions[j]; // the tag, placed last, has no caption and shows on every frame
@@ -1666,9 +1705,9 @@ function captionVideo(target) {
   const rendered = join(dir, outName);
   const enc = final ? ['-preset', 'medium', '-crf', opt.quality === 'high' ? '16' : '18'] : ['-preset', 'veryfast', '-crf', '21'];
   memoryCheck();
-  log(`captioning ${basename(source)}: ${script.captions.length} lines on ${duration} s, ${W}x${H}`);
+  log(`captioning ${basename(source)}: ${script.captions.length} lines on ${duration} s${joined ? ` (${pieces.length} parts of ${info.duration.toFixed(1)} s)` : ''}, ${W}x${H}`);
   const started = Date.now();
-  ff([...inputs, '-/filter_complex', 'assets/caption.filter', '-map', `[b${placed.length}]`, '-map', keepAudio ? '0:a:0' : `${placed.length + 1}:a`, '-t', String(duration),
+  ff([...inputs, '-/filter_complex', 'assets/caption.filter', '-map', `[b${placed.length}]`, '-map', keepAudio ? (joined ? '[cuta]' : '0:a:0') : `${placed.length + 1}:a`, '-t', String(duration),
     '-c:v', 'libx264', ...enc, ...(lowMemoryMachine() ? ['-threads', '2'] : []), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-movflags', '+faststart', outName], dir);
   const took = Math.round((Date.now() - started) / 100) / 10;
   // One frame from the middle of every caption, so each line can be checked against its shot.
@@ -1681,22 +1720,23 @@ function captionVideo(target) {
   const check = draftCheck(rendered, { boxes, work: join(dir, 'assets') });
   const out = deliver(outName, style, (p) => copyFileSync(rendered, p));
   const shown = script.captions.map((c) => c.lines.join(' ').replace(/\*/g, ''));
-  const post = final ? makePost({ slug, style, dir, video: rendered, clean: source, range: [start, start + duration], title: (script.captions.find((c) => c.tags.includes('title')) || script.captions[0]).lines,
+  const post = final ? makePost({ slug, style, dir, video: rendered, clean: source, range: (() => { const p = pieces.slice().sort((x, y) => (y.src1 - y.src0) - (x.src1 - x.src0))[0]; return [p.src0, p.src1]; })(), title: (script.captions.find((c) => c.tags.includes('title')) || script.captions[0]).lines,
     words: shown.flatMap((t) => t.split(/\s+/)).filter(Boolean).map((text) => ({ text })), onScreen: shown, tag, check }) : null;
   rmSync(rendered, { force: true }); // one copy only: the laptop is short on disk
   rmSync(join(dir, 'assets/caption.filter'), { force: true });
-  writeFileSync(join(dir, 'caption.json'), JSON.stringify({ slug, source, lines: 'captions.txt', trim: script.trim, position: script.position, center: r3(center), tag, frame: `${W}x${H}`, duration, captions: script.captions, boxes, check: check ? { ...check.verdict, findings: check.findings } : null }, null, 2) + '\n');
+  writeFileSync(join(dir, 'caption.json'), JSON.stringify({ slug, source, lines: 'captions.txt', trim: joined ? null : { start, end: r3(start + duration) }, pieces, beat: grid ? { bpm: grid.bpm, period: grid.period, first: grid.first, confidence: grid.confidence, from: beatFrom } : null, position: script.position, center: r3(center), tag, frame: `${W}x${H}`, duration, captions: script.captions, boxes, check: check ? { ...check.verdict, findings: check.findings } : null }, null, 2) + '\n');
   const notesPath = deliver(`${slug}-notes.md`, style, (p) => writeFileSync(p, [
     `# ${slug}`, '',
     `${final ? 'Final' : 'Draft'}: ${basename(out)} (${W}x${H}, ${duration} s, H.264/AAC, rendered in ${took} s)`,
-    `Source: ${source}${script.trim ? `, ${script.trim.start}-${script.trim.end} s of it` : ''}`,
+    `Source: ${source}${joined ? `, ${pieces.length} parts of it joined: ${pieces.map((p) => `${p.src0}-${p.src1}`).join(', ')} s` : chosen ? `, ${pieces[0].src0}-${pieces[0].src1} s of it` : ''}`,
     `Lines: fable/video-projects/${slug}/captions.txt (edit it, then \`node fable.mjs caption ${slug}\`)`, '',
     '## What Fable did', '',
-    `- Put ${script.captions.length} written captions on the clip, each at its own time. No cuts, no transcription, no speed changes.`,
+    `- Put ${script.captions.length} written captions on the clip, each at its own time. ${joined ? `Cut down to ${pieces.length} parts (${duration} s of ${info.duration.toFixed(1)} s), joined with hard cuts; no transcription, no speed changes.` : 'No cuts, no transcription, no speed changes.'}`,
     ...script.captions.map((c) => `  - ${fmt(c.start)}-${fmt(c.end)}: "${c.lines.join(' / ')}"${c.tags.length ? ` [${c.tags.join(', ')}]` : ''}`),
     `- Captions centered at ${Math.round(center * 100)}% of the height${script.position ? ` (position: ${script.position})` : face ? `, under the chin (face measured: chin at ${Math.round(face.chin_p90 * 100)}%)` : ' (no face data; lower-middle)'}, inside the band the apps leave free.`,
     script.zoom ? '- A very slow push-in (6%) over the whole clip, held on the face.' : null,
-    `- Sound: ${keepAudio ? "the clip's own audio, untouched" : 'silent track (add the sound in the app)'}.`,
+    grid ? `- Cut to the beat: ${grid.bpm} BPM from ${beatFrom}.${chosen ? ` Every kept part starts and ends on a beat (${pieces.map((p) => p.beats).join(', ')} beats), so the cuts land on it when the song starts with the video.` : ''} ${moved} of ${script.captions.length} captions start on a beat.` : first.beat ? '- No clear beat was found in the music named, so nothing was moved.' : null,
+    `- Sound: ${keepAudio ? (joined ? "the clip's own audio, cut with the picture" : "the clip's own audio, untouched") : 'silent track (add the sound in the app)'}.`,
     tag ? `- House rule: "${tag}" tag top right on every frame.` : '- No AI tag added (pass --tag AI-generated, or a "tag:" line, if the footage is AI-made and does not already show one).',
     '- Nothing left the computer.', '',
     ...(script.warnings.length ? ['## Look at these', '', ...script.warnings.map((w) => `- ${w}`), ''] : []),
@@ -1834,6 +1874,16 @@ if (isMain) {
     case 'caption': if (!target) die('usage: node fable.mjs caption <video|slug> [--lines captions.txt]'); captionVideo(target); break;
     case 'watch': watch(); break;
     case 'status': status(); break;
+    case 'beats': {
+      if (!target) die('usage: node fable.mjs beats <song or video>');
+      try {
+        const g = detectBeats(resolve(target));
+        log(`${basename(target)}: ${g.bpm} BPM, a beat every ${g.period.toFixed(3)} s, first at ${g.first.toFixed(3)} s, ${g.beats.length} beats in ${g.duration.toFixed(1)} s`);
+        log(g.confidence >= 4 ? `clear beat (confidence ${g.confidence})` : `no clear beat (confidence ${g.confidence}; under 4 means the tempo is a guess): this is speech, ambience, or music without a steady pulse`);
+        console.log(g.beats.map((b) => b.toFixed(2)).join(' '));
+      } catch (e) { die(e.message); }
+      break;
+    }
     case 'post': if (!target) die('usage: node fable.mjs post <slug|video.mp4>'); postCommand(target); break;
     case 'check': if (!target) die('usage: node fable.mjs check <slug|video.mp4>'); checkCommand(target); break;
     case 'clean': cleanDisk(); break;
@@ -1845,7 +1895,7 @@ if (isMain) {
       break;
     }
     default:
-      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 21).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 22).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(command ? 1 : 0);
   }
 }

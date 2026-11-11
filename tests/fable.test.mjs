@@ -385,3 +385,68 @@ test('post package: captions and hashtags come from the words in the video, neve
   assert.ok(!/AI-generated label|Add the sound/.test(plain));
   assert.match(plain, /WHAT IS ON SCREEN/);
 });
+
+test('beats: tempo and phase from an onset envelope, and cuts that land on them', async () => {
+  const { beatGrid, snapToBeat, snapPieces, gridFromBpm, ENV_FPS } = await import('../tools/beats.mjs');
+  // An envelope with a jump every 0.5 s starting at 0.2 s, some weaker off-beats, and a little noise.
+  const make = (period, first, seconds, noise = 0.05) => {
+    const n = Math.round(seconds * ENV_FPS), env = new Float64Array(n);
+    let seed = 7;
+    const rand = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    for (let i = 0; i < n; i++) env[i] = noise * rand();
+    for (let t = first; t < seconds; t += period) { env[Math.round(t * ENV_FPS)] += 1; const off = Math.round((t + period / 2) * ENV_FPS); if (off < n) env[off] += 0.3; }
+    return env;
+  };
+  const g = beatGrid(make(0.5, 0.2, 20));
+  assert.ok(Math.abs(g.bpm - 120) < 0.5, `bpm ${g.bpm}`);
+  // The grid passes within 20 ms of the true beats (which one is called "first" does not matter).
+  const off = (t, grid) => { const k = Math.round((t - grid.first) / grid.period); return Math.abs(grid.first + k * grid.period - t); };
+  for (const t of [0.2, 5.2, 12.7, 19.2]) assert.ok(off(t, g) < 0.035, `beat at ${t} is ${off(t, g)} off`);
+  assert.ok(g.confidence >= 4);
+  const slow = beatGrid(make(60 / 96, 0.1, 25));
+  assert.ok(Math.abs(slow.bpm - 96) < 0.5, `bpm ${slow.bpm}`);
+  // Noise has no beat worth trusting; silence and a too-short clip have none at all.
+  const noise = beatGrid(make(0.5, 0.2, 20, 0.05).map((v, i) => ((i * 7919) % 97) / 97));
+  assert.ok(noise.confidence < 4, `noise confidence ${noise.confidence}`);
+  assert.equal(beatGrid(new Float64Array(2000)), null);
+  assert.equal(beatGrid(new Float64Array(50).fill(1)), null);
+  // Snapping: onto the beat when one is close, left alone when not.
+  const grid = { period: 0.5, first: 0.1 };
+  assert.equal(snapToBeat(2.05, grid), 2.1);
+  assert.equal(snapToBeat(2.35, grid, 0.1), 2.35);
+  // Kept parts start and end on beats, at least one beat long, and never run past the end.
+  const pieces = snapPieces([{ start: 0.0, end: 2.0 }, { start: 3.2, end: 3.3 }, { start: 9.4, end: 10.4 }], grid, 10.2);
+  assert.deepEqual(pieces.map((p) => [p.src0, p.src1, p.beats]), [[0.1, 2.1, 4], [3.1, 3.6, 1], [9.6, 10.1, 1]]);
+  assert.deepEqual(pieces.map((p) => [p.out0, p.out1]), [[0, 2], [2, 2.5], [2.5, 3]]);
+  // Without a beat the parts are joined exactly as written.
+  assert.deepEqual(snapPieces([{ start: 1, end: 2.3 }, { start: 5, end: 6 }], null).map((p) => [p.src0, p.src1, p.out0, p.out1]), [[1, 2.3, 0, 1.3], [5, 6, 1.3, 2.3]]);
+  const fixed = gridFromBpm(120, 4);
+  assert.equal(fixed.period, 0.5);
+  assert.equal(fixed.beats[2], 1);
+});
+
+test('caption script: keep, beat, and @part times', async () => {
+  const { parseCaptionScript } = await import('../tools/caption-script.mjs');
+  const text = ['beat: song.mp3', 'keep: 0-2.1, 6.9-8', 'keep: 20.6-23', '', '@1 First part', '@2 [big] Second', '@3 Third part here', '@3+1 a bit into the third'].join('\n');
+  // First reading: the directives, with the @ lines waiting for the parts.
+  const first = parseCaptionScript(text, 30);
+  assert.deepEqual(first.problems, []);
+  assert.deepEqual(first.keep, [{ start: 0, end: 2.1 }, { start: 6.9, end: 8 }, { start: 20.6, end: 23 }]);
+  assert.deepEqual(first.beat, { kind: 'file', file: 'song.mp3' });
+  assert.equal(first.captions.length, 0);
+  // Second reading: each @ line starts with its part; the last one ends with the video.
+  const pieces = [{ out0: 0, out1: 2 }, { out0: 2, out1: 3 }, { out0: 3, out1: 5.5 }];
+  const s = parseCaptionScript(text, 30, { pieces });
+  assert.deepEqual(s.problems, []);
+  assert.deepEqual(s.captions.map((c) => [c.start, c.end]), [[0, 2], [2, 3], [3, 4], [4, 5.5]]);
+  assert.match(parseCaptionScript('keep: 0-2\n@4 nope', 30, { pieces }).problems[0], /@4 but there are 3 kept parts/);
+  // A tempo, the clip's own sound, and off.
+  assert.deepEqual(parseCaptionScript('beat: 116 bpm\n0 hi', 10).beat, { kind: 'bpm', bpm: 116 });
+  assert.deepEqual(parseCaptionScript('beat: own\n0 hi', 10).beat, { kind: 'own' });
+  assert.equal(parseCaptionScript('beat: none\n0 hi', 10).beat, null);
+  assert.ok(parseCaptionScript('beat: 999\n0 hi', 10).problems.length);
+  // Times move onto the beat when one is close; trim and keep together is a problem.
+  const snapped = parseCaptionScript('0 one\n2.05 two\n4.4 three', 10, { snap: (t) => (Math.abs(t - Math.round(t)) <= 0.2 ? Math.round(t) : t) });
+  assert.deepEqual(snapped.captions.map((c) => c.start), [0, 2, 4.4]);
+  assert.ok(parseCaptionScript('trim: 0-5\nkeep: 1-2\n0 hi', 10).problems.some((p) => /not both/.test(p)));
+});

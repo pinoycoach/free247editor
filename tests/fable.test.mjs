@@ -450,3 +450,56 @@ test('caption script: keep, beat, and @part times', async () => {
   assert.deepEqual(snapped.captions.map((c) => c.start), [0, 2, 4.4]);
   assert.ok(parseCaptionScript('trim: 0-5\nkeep: 1-2\n0 hi', 10).problems.some((p) => /not both/.test(p)));
 });
+
+test('style reader: a line is read by its label, as whole words, and the first choice wins', async () => {
+  const { parseStyle, rulesReport, DEFAULT_STYLE } = await import('../tools/style.mjs');
+  const read = (text, media = null) => parseStyle([{ name: 'my-rules.md', text }], media);
+  // The two misfires this replaced. "breath" in an explanation is not "natural pace"...
+  assert.equal(read('- Pace: tight. Cut every breath, pause, and mistake.').style.pace, 'tight');
+  // ...and a note that mentions captions and "stop the scroll" does not move captions to the top.
+  const note = '- [9:16] Benta-serye: a selling skit. The cut has to stop the scroll: a title card in the caption slot, no music, natural pace.';
+  const mixed = read(`- Caption position: lower third\n- Sound: music bed\n- Pace: tight\n${note}`);
+  assert.equal(mixed.style.position, 'lower');
+  assert.equal(mixed.style.sound, 'music');
+  assert.equal(mixed.style.pace, 'tight');
+  assert.match(mixed.report.at(-1).why, /"Benta-serye" is not a setting Fable reads/);
+  // Every choice the style setup offers, as the skill tells agents to write them.
+  const full = read(['- Format: horizontal 16:9', '- Captions: key-word pills, lower third, #ff3366 highlight, bigger', '- Hook: never', '- Pace: natural, keep short pauses',
+    '- Graphics: heavy motion graphics', '- Color: orange and teal', '- Sound: sound effects plus a quiet music bed', '- B-roll: lots of stock clips', '- Voice: natural',
+    '- Retakes: cut them', '- Stutters: ask first', '- Privacy: local only', '- Font: Bebas Neue', '- Copy to: D:\\\\Backup\\\\outbox (the NAS)', '- Hashtags: #pinoy #fyp'].join('\n')).style;
+  assert.deepEqual([full.format, full.captions, full.position, full.accent, full.hook, full.pace, full.graphics, full.grade, full.sound, full.broll, full.voice, full.retakes, full.stutters, full.privacy, full.font],
+    ['horizontal', 'pills', 'lower', '#ff3366', false, 'natural', 'heavy', 'orange-teal', 'music', 'lots', 'natural', 'cut', 'suggest', 'local', 'Bebas Neue']);
+  assert.ok(Math.abs(full.scale - 1.15) < 1e-9);
+  assert.equal(full.copyTo, 'D:\\\\Backup\\\\outbox');
+  assert.deepEqual(full.hashtags, ['#pinoy', '#fyp']);
+  // Whole words only: "stop" is not "top", "snow" is not "no", "bottomless" is not "bottom".
+  assert.equal(read('- Caption position: stop putting them so high').style.position, DEFAULT_STYLE.position);
+  assert.equal(read('- Hook: snow scenes first').style.hook, true);
+  // The first choice wins; brackets are commentary; a color can be a name.
+  assert.equal(read('- Caption position: lower third, not the top').style.position, 'lower');
+  assert.equal(read('- Sound: light sound effects (was: voice only, changed 2026-11-01)').style.sound, 'light');
+  assert.equal(read('- Caption color: yellow with shadow').style.color, '#facc15');
+  assert.equal(read('- Sound: light effects, no music').style.sound, 'light');
+  assert.equal(read('- Sound: voice only').style.sound, 'voice');
+  // Rules come after style and win; scope tags keep a Reel rule off a long horizontal video.
+  const both = parseStyle([{ name: 'my-style.md', text: '- Captions: word by word\n- Pace: tight' }, { name: 'my-rules.md', text: '- [16:9] [>90s] Captions: subtitles\n- Pace: natural' }], { vertical: true, duration: 30 });
+  assert.equal(both.style.captions, 'word');
+  assert.equal(both.style.pace, 'natural');
+  assert.match(both.report.find((r) => /subtitles/.test(r.line)).why, /another kind of video/);
+  assert.equal(parseStyle([{ name: 'r', text: '- [16:9] [>90s] Captions: subtitles' }], { vertical: false, duration: 300 }).style.captions, 'subtitles');
+  // A short line without a label is read by its topic word; a long sentence without one is a note.
+  assert.equal(read('bigger captions').style.scale, 1.15);
+  assert.equal(read('no hook').style.hook, false);
+  const prose = read('The user said the captions should feel like a friend talking, never like the top of a news show.');
+  assert.deepEqual(prose.style, DEFAULT_STYLE);
+  assert.match(prose.report[0].why, /no label/);
+  // A known label with nothing Fable can use says so instead of guessing.
+  const vague = read('- Captions: when the user gives the exact words, those words win over the transcript.');
+  assert.deepEqual(vague.style, DEFAULT_STYLE);
+  assert.match(vague.report[0].why, /about captions, but no choice/);
+  // The report names what was read and what was not.
+  const lines = rulesReport(mixed).join('\n');
+  assert.match(lines, /position = lower/);
+  assert.match(lines, /Not used by the autopilot/);
+  assert.match(lines, /pace = tight/);
+});

@@ -17,6 +17,7 @@
 //   node fable.mjs post <slug|video.mp4> [--cover-at 12.5] [--title "Line one / line two"]   cover image and post sheet; made with every final
 //   node fable.mjs check <slug|video.mp4>            the draft check on its own: sound, black frames, text against the app buttons and the face
 //   node fable.mjs status
+//   node fable.mjs rules                             what each line of my-style.md and my-rules.md was read as, and which were not used
 //   node fable.mjs clean [slug] [--apply] [--days 3] [--all]  what finished or idle projects can give back; deletes only with --apply
 //   node fable.mjs review <slug|draft.mp4> [--dry-run]  opt-in: Gemini watches the draft, notes to outbox/<slug>-review.md
 //   --engine fast|browser   fast (default): FFmpeg + libass, seconds. browser: HyperFrames + Chrome, minutes.
@@ -41,6 +42,7 @@ import { planMotion } from './tools/motion.mjs';
 import { cleanTargets, mb, projectKind } from './tools/clean.mjs';
 import { coverCenter, postSheet, screenWords, sentences } from './tools/post.mjs';
 import { detectBeats, gridFromBpm, snapPieces, snapToBeat } from './tools/beats.mjs';
+import { parseStyle, ruleApplies, rulesReport } from './tools/style.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -167,95 +169,14 @@ function cleanup(dir) {
 }
 
 // ---------- style: my-style.md and my-rules.md in plain words ----------
-// A rule line may start with a scope tag so a note from a Reel never fires on a long horizontal
-// tutorial: [9:16] [16:9] [<90s] [>90s]. Untagged lines apply everywhere.
-function ruleApplies(line, media) {
-  if (!media) return true;
-  const tags = [...line.matchAll(/\[(9:16|16:9|<(\d+)s|>(\d+)s)\]/g)];
-  for (const t of tags) {
-    if (t[1] === '9:16' && !media.vertical) return false;
-    if (t[1] === '16:9' && media.vertical) return false;
-    if (t[2] && !(media.duration < Number(t[2]))) return false;
-    if (t[3] && !(media.duration > Number(t[3]))) return false;
-  }
-  return true;
+// The reading itself is in tools/style.mjs: each line by its label, whole words only, and the
+// first choice word wins. `node fable.mjs rules` prints what every line was read as.
+function loadStyle(media = null) {
+  const files = ['my-style.md', 'my-rules.md'].filter((f) => existsSync(join(root, f))).map((f) => ({ name: f, text: readFileSync(join(root, f), 'utf8') }));
+  return parseStyle(files, media);
 }
 function readStyle(media = null) {
-  const style = {
-    format: 'vertical', captions: 'word', position: 'upper', color: '#ffffff', accent: '#facc15',
-    hook: true, pace: 'tight', graphics: 'some', grade: 'natural', sound: 'light', font: 'Montserrat', broll: 'none',
-  };
-  const apply = (text) => {
-    for (const raw of text.split(/\r?\n/)) {
-      const line = raw.toLowerCase();
-      if (!line.trim() || line.startsWith('#') || !ruleApplies(raw, media)) continue;
-      // "Hashtags: #pinoy #fyp" are the standing tags for every post sheet; nothing else is read from that line.
-      if (/^\s*-?\s*hashtags?:/i.test(raw)) { style.hashtags = [...new Set([...(style.hashtags || []), ...(raw.match(/#[\p{L}\p{N}_]+/gu) || [])])]; continue; }
-      const never = /\b(never|no|none|wala|huwag|don't|do not)\b/.test(line);
-      if (/format|aspect|orientation/.test(line) || /\b(9:16|16:9)\b/.test(line)) {
-        if (/both/.test(line)) style.format = 'both';
-        else if (/horizontal|16:9|landscape|youtube/.test(line)) style.format = 'horizontal';
-        else if (/vertical|9:16|portrait|reel|tiktok|short/.test(line)) style.format = 'vertical';
-      }
-      if (/caption|subtitle/.test(line)) {
-        if (/none|no caption|walang caption/.test(line)) style.captions = 'none';
-        else if (/word by word|one word|isang salita|one big/.test(line)) style.captions = 'word';
-        else if (/pill/.test(line)) style.captions = 'pills';
-        else if (/full.sentence|sentence|subtitle/.test(line)) style.captions = 'subtitles';
-        else if (/bold|key ?word/.test(line)) style.captions = 'bold';
-        if (/upper|top|taas/.test(line)) style.position = 'upper';
-        else if (/middle|center|centre|gitna/.test(line)) style.position = 'middle';
-        else if (/lower|bottom|baba/.test(line)) style.position = 'lower';
-        const hex = line.match(/#[0-9a-f]{6}\b/g);
-        if (hex) { if (/highlight|accent|key/.test(line)) style.accent = hex[0]; else style.color = hex[0]; }
-        if (/bigger|larger|mas malaki/.test(line)) style.scale = (style.scale || 1) * 1.15;
-        if (/smaller|mas maliit/.test(line)) style.scale = (style.scale || 1) * 0.88;
-      }
-      if (/\bhook\b/.test(line)) style.hook = !never;
-      if (/\bpace\b|pacing|tempo|bilis/.test(line)) {
-        if (/natural|breath|relaxed|slow|keep (short )?pauses/.test(line)) style.pace = 'natural';
-        else if (/tight|fast|mabilis|cut every/.test(line)) style.pace = 'tight';
-      }
-      if (/graphic|motion card/.test(line)) {
-        if (/minimal|none|no graphics/.test(line)) style.graphics = 'minimal';
-        else if (/heavy|lots|maraming/.test(line)) style.graphics = 'heavy';
-        else if (/some/.test(line)) style.graphics = 'some';
-      }
-      if (/\bcolor\b|\bcolour\b|grade|look/.test(line) && !/caption/.test(line)) {
-        if (/black and white|b&w|monochrome/.test(line)) style.grade = 'bw';
-        else if (/orange.*teal|teal.*orange/.test(line)) style.grade = 'orange-teal';
-        else if (/\bwarm\b/.test(line)) style.grade = 'warm';
-        else if (/\bcool\b/.test(line)) style.grade = 'cool';
-        else if (/natural|as filmed/.test(line)) style.grade = 'natural';
-      }
-      if (/\bsound\b|audio|music|sfx|effects/.test(line)) {
-        if (/voice only|no sound effects|no sfx|walang/.test(line)) style.sound = 'voice';
-        else if (/music/.test(line) && !never) style.sound = 'music';
-        else if (/light|some|sound effects|sfx/.test(line)) style.sound = 'light';
-      }
-      if (/\bvoice:/.test(line)) style.voice = /natural|raw|untouched|as recorded/.test(line) ? 'natural' : 'level';
-      // "Copy to: G:\My Drive\Fable\outbox" mirrors every draft, final, and notes file to that folder.
-      if (/^\s*-?\s*(copy to|mirror( to)?|also save to):/i.test(raw)) { const m = raw.match(/:\s*(.+?)\s*(?:\(.*)?$/); if (m) style.copyTo = m[1].trim().replace(/^["']|["']$/g, ''); }
-      // "Save to: G:\My Drive\Stitcher\outbox" saves outputs there in place of outbox/ (one copy, not two).
-      else if (/^\s*-?\s*(save to|outbox):/i.test(raw)) { const m = raw.match(/:\s*(.+?)\s*(?:\(.*)?$/); if (m) style.saveTo = m[1].trim().replace(/^["']|["']$/g, ''); }
-      if (/retakes?:/.test(line)) style.retakes = /\bcut\b|remove|auto/.test(line) && !never ? 'cut' : 'suggest';
-      if (/stutters?:/.test(line)) style.stutters = /suggest|ask|keep/.test(line) || never ? 'suggest' : 'cut';
-      if (/privacy|stealth|offline|local only/.test(line)) style.privacy = /local|offline|stealth|only/.test(line) && !/\bno\b|off/.test(line) ? 'local' : 'normal';
-      if (/b-?roll|stock (footage|clips?)/.test(line)) {
-        if (never) style.broll = 'none';
-        else if (/lots|heavy|marami|many|every/.test(line)) style.broll = 'lots';
-        else style.broll = 'some';
-      }
-      if (/\bfont\b/.test(line)) {
-        const m = raw.match(/font[^:]*:\s*([A-Za-z][A-Za-z0-9 ]{2,30})/i);
-        if (m) style.font = m[1].trim();
-      }
-    }
-  };
-  for (const file of ['my-style.md', 'my-rules.md']) {
-    const p = join(root, file);
-    if (existsSync(p)) apply(readFileSync(p, 'utf8'));
-  }
+  const { style } = loadStyle(media);
   if (opt.format) style.format = opt.format;
   return style;
 }
@@ -1874,6 +1795,7 @@ if (isMain) {
     case 'caption': if (!target) die('usage: node fable.mjs caption <video|slug> [--lines captions.txt]'); captionVideo(target); break;
     case 'watch': watch(); break;
     case 'status': status(); break;
+    case 'rules': console.log(rulesReport(loadStyle()).join('\n')); break;
     case 'beats': {
       if (!target) die('usage: node fable.mjs beats <song or video>');
       try {
@@ -1895,7 +1817,7 @@ if (isMain) {
       break;
     }
     default:
-      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 22).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 23).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(command ? 1 : 0);
   }
 }

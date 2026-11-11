@@ -14,7 +14,7 @@ editing or coding terms. Run every command from the repo root unless a step says
 | Path | What it is |
 | --- | --- |
 | `setup.mjs` | One-time setup. Safe to re-run. |
-| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `beats`, `post`, `check`, `watch`, `status`, `clean`, `review`. |
+| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `beats`, `post`, `check`, `watch`, `status`, `rules`, `clean`, `review`. |
 | `tools/transcribe.mjs` | Free word-level transcription (Groq, or `--local` faster-whisper). |
 | `tools/review.mjs` | Opt-in draft review by Gemini (`node fable.mjs review <slug>`). |
 | `inbox/` | Raw videos the user wants edited. |
@@ -92,10 +92,17 @@ Cover:
   Pexels. Get it the same way as the Groq key, into `PIXABAY_API_KEY=` in `.env`.
 
 Write `my-style.md` as short plain bullets, one per choice, in the user's words where they
-gave them. The autopilot reads these lines by keyword, so keep the choice words in them
-(for example "Captions: word by word", "Caption position: upper third", "Pace: tight",
-"Sound: light sound effects", a hex color like `#ff3366` where a color was chosen). If a
-video is already in `inbox/`, run the autopilot on it right away as the sample.
+gave them. The autopilot reads each line by its label, the words before the colon, so start
+every line with one and put the choice right after it (for example "Captions: word by word",
+"Caption position: upper third", "Pace: tight", "Sound: light sound effects", a color as a name
+or a hex like `#ff3366`). Explanation can follow the choice: the first choice word wins and
+anything in (brackets) is ignored. Then run `node fable.mjs rules` and check every line was read
+as you meant. If a video is already in `inbox/`, run the autopilot on it right away as the sample.
+
+Labels Fable reads: Format, Captions, Caption position, Caption color, Accent, Caption size,
+Hook, Pace, Graphics, Color, Sound, Voice, B-roll, Font, Retakes, Stutters, Privacy, Names,
+Hashtags, Save to, Copy to. A line with any other label ("Benta-serye: ...") is a note for you,
+the agent: the autopilot ignores it whatever words it contains, and `rules` lists it as not used.
 
 ## Editing: "edit this", "edit mo to", a dropped video, or a new file in inbox/
 
@@ -270,7 +277,7 @@ ones they agree to, as normal notes. The review is the model's opinion: the user
   kind of note comes twice), add it to `my-rules.md` as one plain line the autopilot can read
   (for example "Captions: lower third" or "Hook: never") plus the user's exact words and the
   date. A rule that only fits one kind of video gets a scope tag at the front: `[9:16]`,
-  `[16:9]`, `[<90s]`, or `[>90s]`, so a Reel note never fires on a long horizontal tutorial. Confirm in one line: "Saved as a rule: ...". Never write rules into `fable/`.
+  `[16:9]`, `[<90s]`, or `[>90s]`, so a Reel note never fires on a long horizontal tutorial. After writing a rule, run `node fable.mjs rules`: it prints what each line of `my-style.md` and `my-rules.md` was read as and which lines were not used. If your new line is under "Not used", it has no label Fable knows or no choice word after it; reword it, or accept that it is a note only you will act on. Confirm in one line: "Saved as a rule: ...". Never write rules into `fable/`.
 - A rule line `Copy to: <folder>` (a synced Drive folder, a NAS, a shared drive) makes Fable
   copy every draft, final, and notes file there as well as to `outbox/`. If the folder is not
   reachable, the local outbox still has everything and the log says the copy failed.

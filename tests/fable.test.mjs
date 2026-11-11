@@ -154,3 +154,41 @@ test('stitch: the brief sets clip order and caption; saved outputs are not clips
   assert.ok(lines.length <= 3 && lines.join(' ') === b.caption);
   assert.ok(isOutput('officiant_final.mp4') && isOutput('reel-v2.mp4') && !isOutput('The-officiant-in.mp4'));
 });
+
+test('caption script: timed lines, open ends, tags, directives, and reading-speed warnings', async () => {
+  const { parseCaptionScript, captionCenter } = await import('../tools/caption-script.mjs');
+  const s = parseCaptionScript([
+    '# a comment', 'position: lower', 'tag: AI-generated', 'audio: mute', '',
+    '0-1.3  [title] [serif] KA-VOGUE,',
+    '1.3    ang laki ng next / water bill mo.',
+    "2.9-4  I don't care. 🙂",
+    '0:06   [big] *Nasaan?* 👀',
+  ].join('\n'), 10);
+  assert.deepEqual(s.problems, []);
+  assert.equal(s.position, 'lower');
+  assert.equal(s.tag, 'AI-generated');
+  assert.equal(s.audio, 'mute');
+  assert.deepEqual(s.captions.map((c) => [c.start, c.end]), [[0, 1.3], [1.3, 2.9], [2.9, 4], [6, 10]]);
+  assert.deepEqual(s.captions[0].tags, ['title', 'serif']);
+  assert.deepEqual(s.captions[1].lines, ['ang laki ng next', 'water bill mo.']);
+  assert.deepEqual(s.captions[3].lines, ['*Nasaan?* 👀']);
+  // A line with no time, an unknown tag, and a bad trim are problems, each with its line number.
+  const bad = parseCaptionScript('hello there\n2 [huge] hi\ntrim: 9-3', 10);
+  assert.equal(bad.problems.length, 3);
+  assert.match(bad.problems[0], /^line 1:/);
+  // Too many words for the time is a warning, not a stop; so is an end that runs into the next line.
+  const fast = parseCaptionScript('0-1 one two three four five six seven\n0.5-2 ok', 10);
+  assert.equal(fast.problems.length, 0);
+  assert.ok(fast.warnings.some((w) => /too fast to read/.test(w)));
+  // Trim: times count from the trim start, and the last open line ends with the trimmed video.
+  const t = parseCaptionScript('trim: 5-9\n0 hello\n2 world', 30);
+  assert.deepEqual(t.captions.map((c) => [c.start, c.end]), [[0, 2], [2, 4]]);
+  // Long text without a hand break is balanced over up to three lines.
+  const w = parseCaptionScript('0-6 This is the only flood control project that really works', 10);
+  assert.ok(w.captions[0].lines.length >= 2 && w.captions[0].lines.length <= 3);
+  // Default spot: under the chin when the face was measured, always inside the free band.
+  const face = { face_top_p10: 0.3, chin_p90: 0.55 };
+  assert.ok(captionCenter(null, face, 0.1) >= 0.55 + 0.03 + 0.05 - 1e-9);
+  assert.ok(captionCenter(null, null, 0.1) > 0.5 && captionCenter(0.99, null, 0.1) <= 0.75 + 1e-9);
+  assert.ok(captionCenter('upper', face, 0.1) < 0.3);
+});

@@ -14,7 +14,7 @@ editing or coding terms. Run every command from the repo root unless a step says
 | Path | What it is |
 | --- | --- |
 | `setup.mjs` | One-time setup. Safe to re-run. |
-| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `watch`, `status`, `review`. |
+| `fable.mjs` | The autopilot: `edit`, `rebuild`, `final`, `stitch`, `caption`, `watch`, `status`, `review`. |
 | `tools/transcribe.mjs` | Free word-level transcription (Groq, or `--local` faster-whisper). |
 | `tools/review.mjs` | Opt-in draft review by Gemini (`node fable.mjs review <slug>`). |
 | `inbox/` | Raw videos the user wants edited. |
@@ -150,6 +150,36 @@ the brief or file names say AI, and writes `outbox/<slug>-vN.mp4` plus notes. It
 outputs in the folder (`*_final.mp4`, `*-v2.mp4`). Look at `assets/review-shots.png` in the
 project to check order and placement. On approval, `--final`. A brief may ask for the video to
 be saved back to its folder; that is an upload, so ask first, then copy it there.
+
+## Written captions on a clip: "caption this", a skit, an AI clip, a quiet take
+
+When the captions carry the video and the words are written, not spoken (a funny line per pose,
+a selling skit, a silent or music-only clip), do not run `edit` and do not hand-build a script.
+Watch the footage first (a contact sheet at 2 fps shows each pose and its time), then write the
+lines in `<video name>.captions.txt` beside the video, one per line with a time first:
+
+```
+position: lower          (optional: upper | middle | lower | 0..1; default is under the face)
+trim: 5-20.6             (optional: use only this part; caption times count from its start)
+tag: AI-generated        (optional: only when the clip does not already show a tag)
+audio: mute              (optional: default keeps the clip's own sound)
+
+0-1.3   [title] [serif] KA-VOGUE,
+1.3     ang laki ng next / water bill mo.
+2.9     [big] I don't care. 🙂
+6.9     *Nasaan?* 👀
+```
+
+A line with no end time holds until the next one. ` / ` breaks a line by hand; long lines are
+balanced on their own. `*stars*` draw a word in the accent color. Tags: `[title]` (bigger, accent
+color), `[big]`, `[small]`, `[serif]`. Emoji come out in color. Then run
+`node fable.mjs caption "<video>"` (add `--slug name` for a clean name). It measures the face so
+the text sits under the chin, renders in seconds, writes `<slug>-vN.mp4` and notes, and warns
+about lines that are too fast to read. Look at `assets/review-shots.png` in the project (one
+frame per caption) and fix what covers a face or a hand. To change a line, edit
+`fable/video-projects/<slug>/captions.txt` and run `node fable.mjs caption <slug>`; on approval
+add `--final`. Time each line to what the body or the shot is doing; that is where the joke lands.
+Needs Python with Pillow (`pip install pillow`).
 
 ## A script with the video
 

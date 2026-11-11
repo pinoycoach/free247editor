@@ -9,7 +9,10 @@
 //   node fable.mjs stitch <folder> [--caption "..."] [--sub "2.7-4.04 line"] [--tag AI-generated] [--final]
 //       Finished clips joined in order with hard cuts, their own audio, one fixed caption; nothing re-timed.
 //       --sub (repeatable) adds a small timed line under the caption; it is kept for later runs, --sub "" clears.
-//   node fable.mjs watch [--every 5] [--once]        24/7: edit every new video that lands in inbox/
+//   node fable.mjs caption <video|slug> [--lines captions.txt] [--tag AI-generated] [--final]
+//       Written captions on a clip, each at its own time (emoji, title cards, accent words); nothing is
+//       transcribed or cut. The lines come from <video name>.captions.txt beside the video, or --lines.
+//   node fable.mjs watch [--every 5] [--once]       24/7: edit every new video that lands in inbox/
 //   node fable.mjs status
 //   node fable.mjs review <slug|draft.mp4> [--dry-run]  opt-in: Gemini watches the draft, notes to outbox/<slug>-review.md
 //   --engine fast|browser   fast (default): FFmpeg + libass, seconds. browser: HyperFrames + Chrome, minutes.
@@ -28,6 +31,7 @@ import { parseArgs } from 'node:util';
 import { captionLayout, hasFastFonts, renderFast, reviewSheets } from './tools/fast-render.mjs';
 import { alignScript, hookFromScript } from './tools/script-align.mjs';
 import { isOutput, orderClips, parseBrief, stitchFrame, wrapCaption } from './tools/stitch.mjs';
+import { captionCenter, parseCaptionScript } from './tools/caption-script.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -50,7 +54,7 @@ const { values: opt, positionals } = parseArgs({
     every: { type: 'string', default: '5' }, once: { type: 'boolean' }, 'no-render': { type: 'boolean' },
     engine: { type: 'string', default: 'fast' },
     script: { type: 'string' }, tag: { type: 'string' }, caption: { type: 'string' }, final: { type: 'boolean' },
-    sub: { type: 'string', multiple: true },
+    sub: { type: 'string', multiple: true }, lines: { type: 'string' },
     'dry-run': { type: 'boolean' }, model: { type: 'string' },
   },
 });
@@ -1349,6 +1353,118 @@ function stitch(folder) {
   return { slug, out, notes: notesPath, order, caption, tag };
 }
 
+// ---------- caption: written lines on a clip, each at its own time ----------
+// For footage where the captions carry the video (a skit, an AI clip, a quiet single take): no
+// transcription, no cuts. The lines live in a plain text file (format in tools/caption-script.mjs);
+// the cards are drawn by tools/caption_cards.py so emoji come out in color.
+const SERIF_FONTS = ['C:/Windows/Fonts/georgiab.ttf', '/System/Library/Fonts/Supplemental/Georgia Bold.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf'];
+function captionVideo(target) {
+  // A slug of an earlier caption project works too: `caption ka-vogue --final`.
+  const prevPath = join(projects, target, 'caption.json');
+  const prev = !existsSync(resolve(target)) && existsSync(prevPath) ? JSON.parse(readFileSync(prevPath, 'utf8')) : null;
+  const source = prev ? prev.source : resolve(target);
+  if (!existsSync(source)) die(prev ? `the video for ${target} is gone: ${source}` : `not found: ${source}`);
+  const slug = opt.slug || prev?.slug || parse(source).name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || 'captioned';
+  const dir = join(projects, slug);
+  mkdirSync(join(dir, 'assets'), { recursive: true });
+  // The lines: --lines, or <video>.captions.txt beside the video, or the copy kept in the project.
+  const kept = join(dir, 'captions.txt');
+  const beside = source.replace(/\.[^.]+$/, '.captions.txt');
+  const scriptPath = opt.lines ? resolve(opt.lines) : existsSync(beside) ? beside : existsSync(kept) ? kept : null;
+  if (!scriptPath || !existsSync(scriptPath)) die(`no caption lines. Write them in ${beside} (or pass --lines <file>), one per line with a time first:\n  0-1.3  [title] KA-VOGUE,\n  1.3    ang laki ng next / water bill mo.\n  2.9    I don't care. 🙂`);
+  const text = readFileSync(scriptPath, 'utf8');
+  if (resolve(scriptPath) !== resolve(kept)) writeFileSync(kept, text);
+
+  const info = probe(source);
+  const script = parseCaptionScript(text, info.duration);
+  if (script.problems.length) die(`${basename(scriptPath)} has ${script.problems.length} problem${script.problems.length > 1 ? 's' : ''}:\n  ${script.problems.join('\n  ')}`);
+  const start = script.trim?.start || 0;
+  const duration = r3(Math.min(info.duration, script.trim?.end ?? Infinity) - start);
+  if (duration < 0.5) die(`trim ${script.trim.start}-${script.trim.end} leaves nothing of a ${info.duration.toFixed(1)} s video`);
+  const style = readStyle({ vertical: info.height > info.width, duration });
+  const { w: W, h: H } = info.height > info.width * 1.2 ? { w: 1080, h: 1920 } : info.width > info.height * 1.2 ? { w: 1920, h: 1080 } : stitchFrame(info.width, info.height);
+
+  // Where the face is, so the default spot is under the chin. Optional (OpenCV), measured once.
+  const facePath = join(dir, 'assets/face.json');
+  let face = null;
+  try {
+    if (!existsSync(facePath)) run('python', [join(root, 'tools/track_face.py'), source, facePath]);
+    face = JSON.parse(readFileSync(facePath, 'utf8')).summary || null;
+  } catch (e) { log(`face tracking skipped (${/No module named .cv2./.test(e.message) ? 'pip install opencv-python-headless to enable it' : e.message.split('\n').pop()})`); }
+
+  const size = Math.round(H > W ? W * 0.085 : H * 0.075);
+  const SCALE = { title: 1.5, big: 1.3, small: 0.75 };
+  const cards = script.captions.map((c, i) => ({
+    out: `assets/cap${String(i).padStart(2, '0')}.png`, lines: c.lines,
+    scale: c.tags.reduce((k, t) => k * (SCALE[t] || 1), 1), serif: c.tags.includes('serif'), color: c.tags.includes('title') ? style.accent : null,
+  }));
+  const tallest = Math.max(...cards.map((c) => c.lines.length * size * c.scale * 1.2));
+  const center = captionCenter(script.position, face, tallest / H);
+  // House rule: AI-made footage carries a tag on every frame (skip it when the clip already shows one).
+  const tag = opt.tag || script.tag || prev?.tag || null;
+  if (tag) cards.push({ out: 'assets/tag.png', lines: [tag], scale: 0.36, x: W - Math.round(W * 0.03), y: Math.round(H * 0.13), anchor: 'ne' });
+  writeFileSync(join(dir, 'assets/cards.json'), JSON.stringify({
+    W, H, centerY: Math.round(center * H), maxW: Math.round(W * 0.9), size, color: style.color, accent: style.accent,
+    font: join(fontsDir, 'Montserrat-ExtraBold.ttf'), serif: SERIF_FONTS.find((f) => existsSync(f)) || null, cards,
+  }, null, 2));
+  let placed;
+  try { placed = JSON.parse(run('python', [join(root, 'tools/caption_cards.py'), 'assets/cards.json'], { cwd: dir })); } catch (e) {
+    die(/No module named .PIL./.test(e.message) ? 'the caption cards need Pillow. Run: pip install pillow' : `could not draw the caption cards: ${e.message.split('\n').slice(-3).join(' ')}`);
+  }
+
+  const inputs = ['-ss', String(start), '-t', String(duration + 0.2), '-i', source], chain = [];
+  chain.push(`[0:v]scale=${W}:${H}:force_original_aspect_ratio=increase:flags=lanczos,crop=${W}:${H},setsar=1,fps=${FPS},format=yuv420p[b0]`);
+  placed.forEach((p, j) => {
+    inputs.push('-i', p.file);
+    const c = script.captions[j]; // the tag, placed last, has no caption and shows on every frame
+    chain.push(`[b${j}][${j + 1}:v]overlay=${p.x}:${p.y}${c ? `:enable='gte(t,${c.start})*lt(t,${c.end})'` : ''}[b${j + 1}]`);
+  });
+  const keepAudio = info.hasAudio && script.audio !== 'mute';
+  if (!keepAudio) inputs.push('-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo');
+  writeFileSync(join(dir, 'assets/caption.filter'), chain.join(';\n'));
+  const final = !!opt.final;
+  const outName = final ? `${slug}-final.mp4` : `${slug}-v${nextVersion(slug, '', style)}.mp4`;
+  const rendered = join(dir, outName);
+  const enc = final ? ['-preset', 'medium', '-crf', opt.quality === 'high' ? '16' : '18'] : ['-preset', 'veryfast', '-crf', '21'];
+  memoryCheck();
+  log(`captioning ${basename(source)}: ${script.captions.length} lines on ${duration} s, ${W}x${H}`);
+  const started = Date.now();
+  ff([...inputs, '-/filter_complex', 'assets/caption.filter', '-map', `[b${placed.length}]`, '-map', keepAudio ? '0:a:0' : `${placed.length + 1}:a`, '-t', String(duration),
+    '-c:v', 'libx264', ...enc, ...(lowMemoryMachine() ? ['-threads', '2'] : []), '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '192k', '-ar', '48000', '-movflags', '+faststart', outName], dir);
+  const took = Math.round((Date.now() - started) / 100) / 10;
+  // One frame from the middle of every caption, so each line can be checked against its shot.
+  const picks = script.captions.map((c) => Math.round(((c.start + c.end) / 2) * FPS)).filter((n, i, a) => a.length <= 48 || i % Math.ceil(a.length / 48) === 0);
+  const cols = Math.min(8, picks.length);
+  try { ff(['-i', outName, '-vf', `select='${picks.map((n) => `eq(n\\,${n})`).join('+')}',scale=${H > W ? 270 : 480}:-2,tile=${cols}x${Math.ceil(picks.length / cols)}`, '-fps_mode', 'vfr', '-frames:v', '1', '-update', '1', 'assets/review-shots.png'], dir); } catch (e) { log(`review sheet skipped: ${e.message.split('\n')[0]}`); }
+
+  const out = deliver(outName, style, (p) => copyFileSync(rendered, p));
+  rmSync(rendered, { force: true }); // one copy only: the laptop is short on disk
+  rmSync(join(dir, 'assets/caption.filter'), { force: true });
+  writeFileSync(join(dir, 'caption.json'), JSON.stringify({ slug, source, lines: 'captions.txt', trim: script.trim, position: script.position, center: r3(center), tag, frame: `${W}x${H}`, duration, captions: script.captions }, null, 2) + '\n');
+  const notesPath = deliver(`${slug}-notes.md`, style, (p) => writeFileSync(p, [
+    `# ${slug}`, '',
+    `${final ? 'Final' : 'Draft'}: ${basename(out)} (${W}x${H}, ${duration} s, H.264/AAC, rendered in ${took} s)`,
+    `Source: ${source}${script.trim ? `, ${script.trim.start}-${script.trim.end} s of it` : ''}`,
+    `Lines: fable/video-projects/${slug}/captions.txt (edit it, then \`node fable.mjs caption ${slug}\`)`, '',
+    '## What Fable did', '',
+    `- Put ${script.captions.length} written captions on the clip, each at its own time. No cuts, no transcription, no speed changes.`,
+    ...script.captions.map((c) => `  - ${fmt(c.start)}-${fmt(c.end)}: "${c.lines.join(' / ')}"${c.tags.length ? ` [${c.tags.join(', ')}]` : ''}`),
+    `- Captions centered at ${Math.round(center * 100)}% of the height${script.position ? ` (position: ${script.position})` : face ? `, under the chin (face measured: chin at ${Math.round(face.chin_p90 * 100)}%)` : ' (no face data; lower-middle)'}, inside the band the apps leave free.`,
+    `- Sound: ${keepAudio ? "the clip's own audio, untouched" : 'silent track (add the sound in the app)'}.`,
+    tag ? `- House rule: "${tag}" tag top right on every frame.` : '- No AI tag added (pass --tag AI-generated, or a "tag:" line, if the footage is AI-made and does not already show one).',
+    '- Nothing left the computer.', '',
+    ...(script.warnings.length ? ['## Look at these', '', ...script.warnings.map((w) => `- ${w}`), ''] : []),
+    '## Check', '',
+    `- fable/video-projects/${slug}/assets/review-shots.png: one frame per caption, to check each line against its shot.`,
+    final ? null : `- Approved? \`node fable.mjs caption ${slug} --final\` writes ${slug}-final.mp4.`,
+  ].filter((l) => l !== null).join('\n') + '\n'));
+  for (const f of [out, notesPath]) { const m = mirror(f, style); if (m) log(`copied to ${m}`); }
+  for (const w of script.warnings) log(`look: ${w}`);
+  log(`done: ${out}`);
+  log(`notes: ${notesPath}`);
+  return { slug, out, notes: notesPath, captions: script.captions, warnings: script.warnings };
+}
+
 function watch() {
   mkdirSync(inbox, { recursive: true });
   const stateDir = join(root, '.fable'), statePath = join(stateDir, 'watch.json');
@@ -1411,6 +1527,7 @@ if (isMain) {
     case 'rebuild': if (!target) die('usage: node fable.mjs rebuild <slug>'); await rebuild(target); break;
     case 'final': if (!target) die('usage: node fable.mjs final <slug>'); await rebuild(target, true); break;
     case 'stitch': if (!target) die('usage: node fable.mjs stitch <folder>'); stitch(target); break;
+    case 'caption': if (!target) die('usage: node fable.mjs caption <video|slug> [--lines captions.txt]'); captionVideo(target); break;
     case 'watch': watch(); break;
     case 'status': status(); break;
     case 'review': {
@@ -1421,7 +1538,7 @@ if (isMain) {
       break;
     }
     default:
-      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 15).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
+      console.log(readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 18).map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
       process.exit(command ? 1 : 0);
   }
 }

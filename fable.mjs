@@ -46,6 +46,7 @@ import { coverCenter, postSheet, screenWords, sentences } from './tools/post.mjs
 import { detectBeats, gridFromBpm, snapPieces, snapToBeat } from './tools/beats.mjs';
 import { parseStyle, ruleApplies, rulesReport } from './tools/style.mjs';
 import { clipName, findClips } from './tools/long.mjs';
+import { measureVoice, voiceChain } from './tools/voice.mjs';
 
 const FPS = 30;
 const root = dirname(fileURLToPath(import.meta.url));
@@ -532,7 +533,7 @@ function hookGate(plan, style, lay) {
   const capFont = style.captions === 'subtitles' ? L.sub : style.captions === 'word' ? L.word : L.group;
   const capTop = Math.round(L.capY - capFont * 0.7), capBottom = Math.round(L.capY + capFont * 0.7);
   checks.push({ check: `hook card below the top ${safeTop}px (platform UI)`, pass: hookTop === null || hookTop >= safeTop, value: hookTop === null ? 'no hook' : `top at ${hookTop}px` });
-  checks.push({ check: `captions inside ${safeTop}..${safeBottom}px and clear of the hook`, pass: capTop >= safeTop && capBottom <= safeBottom && (hookTop === null || capTop >= L.hookY + L.hookBlock / 2), value: `${capTop}..${capBottom}px` });
+  checks.push({ check: `captions inside ${safeTop}..${safeBottom}px and clear of the hook`, pass: capTop >= safeTop && capBottom <= safeBottom && (hookTop === null || L.hookShared || capTop >= L.hookY + L.hookBlock / 2), value: `${capTop}..${capBottom}px` });
   if (plan.face && lay.fit === 'cover') {
     // Measured: the face box from face.json, in pixels of this layout. Text must not enter it.
     const faceTop = Math.round(plan.face.face_top_p10 * lay.h), chin = Math.round(plan.face.chin_p90 * lay.h);
@@ -629,7 +630,12 @@ function layoutFor(format, src) {
   const fh = Math.round(1080 * src.height / src.width / 2) * 2;
   return { w: 1080, h: 1920, fit: 'band', foot: { x: 0, y: Math.round((1920 - fh) / 2 + 40), w: 1080, h: fh } };
 }
-function buildFootage(dir, segments, lay, grade) {
+function buildFootage(dir, segments, lay, grade, light = false) {
+  // The same cut, frame and look as last time: the file is already there. A change to captions,
+  // the hook or the sound then renders in seconds instead of encoding the footage again.
+  const footKey = sha(JSON.stringify([segments.map((s) => [s.src0, s.frames]), lay, grade, light])), keyFile = join(dir, 'assets/footage.key'), footFile = join(dir, 'assets/footage.mp4');
+  if (existsSync(footFile) && statSync(footFile).size > 10000 && existsSync(keyFile) && readFileSync(keyFile, 'utf8') === footKey) return log('footage: the cut has not changed, so it is not encoded again');
+  rmSync(keyFile, { force: true });
   const scale = lay.fit === 'cover'
     ? `scale=${lay.foot.w}:${lay.foot.h}:force_original_aspect_ratio=increase:flags=lanczos,crop=${lay.foot.w}:${lay.foot.h}`
     : `scale=${lay.foot.w}:${lay.foot.h}:flags=lanczos`;
@@ -638,8 +644,12 @@ function buildFootage(dir, segments, lay, grade) {
   writeFileSync(script, v.join(';\n') + ';\n' + segments.map((_, i) => `[v${i}]`).join('') + `concat=n=${segments.length}:v=1:a=0[out]`);
   // x264 at medium is the first choice; on a memory-starved laptop it can refuse to open, so step
   // down rather than fail. The file is checked afterwards: a broken footage file stops the run.
-  const ladder = [['-c:v', 'libx264', '-preset', 'medium', '-crf', '17'], ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-threads', '2']];
-  if (hasAmf()) ladder[lowMemoryMachine() ? 'unshift' : 'push'](['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '18', '-qp_p', '18']);
+  // light: a long cut, or a source far smaller than the frame (an upscale has no fine detail to
+  // keep). The in-between file is then a quarter of the size, about 17 MB a minute, not 70.
+  const ladder = light
+    ? [['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-threads', '2']]
+    : [['-c:v', 'libx264', '-preset', 'medium', '-crf', '17'], ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18', '-threads', '2']];
+  if (hasAmf() && !light) ladder[lowMemoryMachine() ? 'unshift' : 'push'](['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '18', '-qp_p', '18']);
   let lastError = null;
   for (const enc of ladder) {
     try {
@@ -647,6 +657,7 @@ function buildFootage(dir, segments, lay, grade) {
       const size = statSync(join(dir, 'assets/footage.mp4')).size;
       if (size < 10000) throw new Error(`footage came out empty (${size} bytes) with ${enc[1]}`);
       if (enc !== ladder[0]) log(`footage encoded with ${enc[1]} ${enc[3]} (the first choice could not start; the computer is low on memory)`);
+      writeFileSync(keyFile, footKey);
       return;
     } catch (e) { lastError = e; }
   }
@@ -654,14 +665,23 @@ function buildFootage(dir, segments, lay, grade) {
 }
 // Soft phrases come up, loud ones stay put: a high-pass for rumble, gentle compression, then a
 // speech normalizer that lifts quiet passages without pumping. "Voice: natural" in the rules skips it.
-const VOICE_LEVEL = 'highpass=f=80,acompressor=threshold=-22dB:ratio=2.5:attack=8:release=140:makeup=2,speechnorm=e=4:r=0.0005:l=1,alimiter=limit=0.95:level=0';
 function buildVoice(dir, segments, hasAudio, duration, style = {}) {
   if (!hasAudio) { ff(['-f', 'lavfi', '-i', `anullsrc=r=48000:cl=stereo:d=${duration}`, 'assets/voice.wav'], dir); return; }
   const a = segments.map((s, i) => { const d = secs(s.frames); return `[0:a]atrim=start=${s.src0}:end=${r3(s.src0 + d)},asetpts=PTS-STARTPTS,afade=t=in:d=0.012,afade=t=out:st=${r3(Math.max(0, d - 0.015))}:d=0.015[a${i}]`; });
   const script = join(dir, 'assets/voice.filter');
-  const level = style.voice === 'natural' ? '' : `,${VOICE_LEVEL}`;
+  // The recording is measured first (rumble, room noise, muddiness) and gets only what it needs.
+  // "Voice: natural" in the rules leaves it exactly as recorded.
+  let care = null;
+  if (style.voice !== 'natural') {
+    let measured = null;
+    try { measured = measureVoice(join(dir, 'assets/raw.mp4')); } catch (e) { log(`voice not measured (${e.message.split('\n')[0]}); using the standard levelling`); }
+    care = { measured, ...voiceChain(measured) };
+    if (measured) log(`voice: ${care.did.join('; ')}`);
+  }
+  const level = care ? `,${care.filter}` : '';
   writeFileSync(script, a.join(';\n') + ';\n' + segments.map((_, i) => `[a${i}]`).join('') + `concat=n=${segments.length}:v=0:a=1${level},aresample=48000[voice]`);
   ff(['-i', 'assets/raw.mp4', '-/filter_complex', script, '-map', '[voice]', '-ac', '2', '-ar', '48000', 'assets/voice.wav'], dir);
+  return care ? { measured: care.measured, did: care.did } : null;
 }
 const SFX = {
   // Shaped, not beeped: the tap is a soft kick (150 Hz falling to 60), the pop a quick rising
@@ -1132,14 +1152,17 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
   const motion = edit.motion === false || (!(edit.version >= 2) && edit.motion === undefined) ? { zooms: [], cards: [] }
     : edit.motion && typeof edit.motion === 'object' ? { zooms: edit.motion.zooms || [], cards: edit.motion.cards || [], byHand: true }
       : planMotion(tl.words, tl.segments, tl.duration, style, hookEnd);
-  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, 0, tl.duration), words: tl.words, dropped: tl.dropped, network: [], face, tag, motion };
+  // Where the text goes for this footage. On a close-up it moves under the chin, and there the hook
+  // card and the captions take turns: captions start when the card ends.
+  const placed = captionLayout(layoutFor(style.format === 'horizontal' ? 'horizontal' : 'vertical', src), style);
+  const plan = { slug: edit.slug, duration: tl.duration, segments: tl.segments, hook, hookCandidates: candidates, captions: buildCaptions(tl.words, style, hook && placed.hookShared ? hookEnd : 0, tl.duration), placed: { moved: placed.moved, hookShared: Boolean(hook) && placed.hookShared }, words: tl.words, dropped: tl.dropped, network: [], face, tag, motion };
   if (edit.transcription?.provider === 'groq') plan.network.push('audio was sent to Groq for transcription');
   const formats = style.format === 'both' ? ['vertical', 'horizontal'] : [style.format];
   const useBrowser = (edit.style?.engine || opt.engine) === 'browser' || !hasFastFonts(fontsDir);
   log(`cut: ${src.duration.toFixed(1)}s -> ${tl.duration.toFixed(1)}s in ${tl.segments.length} pieces, ${tl.words.length} words, captions: ${style.captions}`);
   const broll = Array.isArray(edit.broll) ? edit.broll : style.privacy === 'local' ? [] : await fetchBroll(dir, tl, style, hookEnd);
   if (broll.length && !Array.isArray(edit.broll)) plan.network.push(`spoken key words were sent to ${broll[0].provider} to find stock clips`);
-  buildVoice(dir, tl.segments, src.hasAudio, tl.duration, style);
+  plan.voice = buildVoice(dir, tl.segments, src.hasAudio, tl.duration, style) || null;
   const mixInfo = buildMix(dir, plan, style, tl.duration);
   plan.gate = hookGate(plan, style, layoutFor(formats[0], src));
   plan.mix = mixInfo;
@@ -1152,12 +1175,14 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
     const lay = layoutFor(fmt, src);
     plan.broll = prepareBroll(dir, broll, lay);
     const file = fmt === formats[0] ? 'index.html' : 'compositions/horizontal.html';
-    if (fmt === formats[0]) buildFootage(dir, tl.segments, lay, style.grade);
+    // Nothing is rendered, so nothing is encoded: the plan, the voice and the mix are enough to judge a cut.
+    const light = tl.duration > 180 || src.width * src.height < 0.5 * lay.foot.w * lay.foot.h;
+    if (!doRender) { /* no footage */ } else if (fmt === formats[0]) buildFootage(dir, tl.segments, lay, style.grade, light);
     else {
       // The second format needs its own footage framing. Keep it beside the first.
       const first = join(dir, 'assets/footage.mp4'), keep = join(dir, 'assets/footage-primary.mp4');
       copyFileSync(first, keep);
-      buildFootage(dir, tl.segments, lay, style.grade);
+      buildFootage(dir, tl.segments, lay, style.grade, light);
       copyFileSync(join(dir, 'assets/footage.mp4'), join(dir, 'assets/footage-horizontal.mp4'));
       copyFileSync(keep, first);
     }
@@ -1185,7 +1210,7 @@ async function build(dir, edit, { quality = 'draft', render: doRender = true, fi
     } else {
       const footage = fmt === formats[0] ? 'assets/footage.mp4' : 'assets/footage-horizontal.mp4';
       if (footage !== 'assets/footage.mp4') copyFileSync(join(dir, footage), join(dir, 'assets/footage.mp4'));
-      const r = renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, hasAmf: hasAmf(), lowMemory: lowMemoryMachine() });
+      const r = renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, hasAmf: hasAmf(), lowMemory: lowMemoryMachine(), light });
       rendered = r.out;
       renders.push({ engine: `ffmpeg (${r.encoder})`, seconds: r.seconds });
       log(`rendered ${out} in ${r.seconds}s with ${r.encoder}`);
@@ -1224,7 +1249,8 @@ function notes(dir, edit, result, suggestions) {
     `- Captions: ${style.captions}${style.captions !== 'none' ? `, ${style.position} third, ${style.color}${style.captions !== 'subtitles' ? ` with ${style.accent} accents` : ''}` : ''}. ${plan.words.length} of ${edit.transcription?.words ?? plan.words.length} transcript words kept${edit.transcription?.voicedSeconds ? `; ${(edit.transcription.words / edit.transcription.voicedSeconds).toFixed(1)} words per voiced second` : ''}${plan.dropped?.length ? `; ${plan.dropped.length} fell inside cuts` : ''}.`,
     edit.script ? `- Script "${edit.script.file}": ${edit.script.matched} of ${edit.script.script} words matched; ${edit.script.changed} shown as written, ${edit.script.inserted} inserted where the model missed them, ${edit.script.dropped} transcript words not in the script left uncaptioned (the footage is untouched; cut it with segments if it should go).` : null,
     edit.transcription?.missed?.length ? `- LOW COVERAGE: voice with no transcript words at ${edit.transcription.missed.map((m) => `${fmt(m.start)}-${fmt(m.end)}`).join(', ')} (source time). Kept uncut. Listen there and add words with "extra" if needed.` : null,
-    plan.hook ? `- Hook card for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}" (${plan.hook.pattern || 'custom'}: ${plan.hook.why || 'set by hand'}). Captions keep running under it.` : '- No hook text (per your style).',
+    plan.hook ? `- Hook card for the first ${plan.hook.end} s: "${plan.hook.lines.join(' / ')}" (${plan.hook.pattern || 'custom'}: ${plan.hook.why || 'set by hand'}). ${plan.placed?.hookShared ? 'Captions start when it ends: under the chin there is room for one at a time.' : 'Captions keep running under it.'}` : '- No hook text (per your style).',
+    plan.placed?.moved ? '- Close-up: the face fills the top of the frame, so the text sits under the chin, not in the upper third where it would cover the eyes.' : null,
     `- Format ${style.format}, color ${style.grade}${result.renders?.[0]?.engine?.startsWith('browser') ? ', slow push-in on every shot' : ''}.`,
     plan.motion?.zooms?.length || plan.motion?.cards?.length
       ? `- Motion (graphics: ${plan.motion.byHand ? 'set by hand in edit.json' : style.graphics}): ${plan.motion.zooms.length} punch-in${plan.motion.zooms.length === 1 ? '' : 's'}${plan.motion.zooms.length ? ` (${plan.motion.zooms.map((z) => `${fmt(z.start)} "${z.on || ''}"`).join(', ')})` : ''}${plan.motion.cards.length ? `; cards: ${plan.motion.cards.map((c) => `"${c.text}" at ${fmt(c.start)}`).join(', ')}` : ''}. ${result.renders?.[0]?.engine?.startsWith('browser') ? 'The browser renderer does not draw these; it has its own push-in.' : 'Drop one by copying "motion" from assets/plan.json into edit.json and deleting it; "motion": false turns all of it off.'}`
@@ -1235,6 +1261,7 @@ function notes(dir, edit, result, suggestions) {
     plan.memory?.hogs?.length ? `- Memory was tight (${plan.memory.free} GB free): ${plan.memory.hogs.slice(0, 3).join(', ')}. Fable used the light encoder path.` : null,
     `- Privacy: ${plan.network?.length ? plan.network.join('; ') + '. Everything else stayed on this computer.' : 'nothing left this computer.'}${style.privacy === 'local' ? ' (local-only mode)' : ''}`,
     plan.handEdited?.length ? `- ${plan.handEdited.join(', ')} was edited by hand and was kept; the freshly generated version sits beside it as *.generated.html. Render the hand-edited one with npx hyperframes render.` : null,
+    plan.voice?.measured ? `- Voice: ${plan.voice.did.join('; ')}. Measured on this recording first; "Voice: natural" in your rules leaves it as recorded.` : style.voice === 'natural' ? '- Voice: as recorded (your rule).' : null,
     `- Sound: ${style.sound === 'voice' ? 'voice only' : `${result.mixInfo.cues.length} soft effects`}${result.mixInfo.music ? `, music bed "${result.mixInfo.music}" ducked under the voice` : ''}, mastered to -14 LUFS.`,
     result.broll.length
       ? `- B-roll: ${result.broll.length} free stock clip${result.broll.length > 1 ? 's' : ''} on the words ${result.broll.map((b) => `"${b.query}" (${fmt(b.at)}, ${b.provider}, ${b.author || 'unknown'})`).join(', ')}. Sources in assets/broll/ledger.json. Your own clips in inbox/ beat stock: tell your agent which ones.`
@@ -1585,7 +1612,7 @@ function captionVideo(target) {
     scale: c.tags.reduce((k, t) => k * (SCALE[t] || 1), 1), serif: c.tags.includes('serif'), color: c.tags.includes('title') ? style.accent : null,
   }));
   const tallest = Math.max(...cards.map((c) => c.lines.length * size * c.scale * 1.2));
-  const center = captionCenter(script.position, face, tallest / H);
+  const center = captionCenter(script.position, face, tallest / H, W > H);
   // House rule: AI-made footage carries a tag on every frame (skip it when the clip already shows one).
   const tag = opt.tag || script.tag || prev?.tag || null;
   if (tag) cards.push({ out: 'assets/tag.png', lines: [tag], scale: 0.36, x: W - Math.round(W * 0.03), y: Math.round(H * 0.13), anchor: 'ne' });

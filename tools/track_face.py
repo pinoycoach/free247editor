@@ -55,7 +55,7 @@ if samples:
         vals = sorted(s[key] for s in samples)
         return vals[min(len(vals) - 1, int(len(vals) * p))]
     res["summary"] = {"face_top_p10": q("top", 0.10), "mouth_min": q("mouth", 0.0), "mouth_median": q("mouth", 0.5),
-                      "chin_p90": q("chin", 0.90), "cx_median": q("cx", 0.5), "cy_median": q("cy", 0.5),
+                      "chin_p90": q("chin", 0.90), "eyes_p10": q("eyes", 0.10), "cx_median": q("cx", 0.5), "cy_median": q("cy", 0.5),
                       "coverage": round(len(samples) / max(1, i // step), 2)}
 Path(out).write_text(json.dumps(res, indent=1), encoding="utf-8")
 print(json.dumps({k: v for k, v in res.items() if k != "timeline"}))

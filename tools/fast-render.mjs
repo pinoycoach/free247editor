@@ -29,7 +29,7 @@ export function captionLayout(lay, style) {
   const sub = Math.round((vertical ? 50 : 42) * sc), hook = Math.round((vertical ? 80 : 64) * sc);
   const safeTop = Math.round(0.14 * H), safeBottom = Math.round(0.80 * H);
   const hookBlock = Math.round(hook * 1.25 * 2);                 // two lines at 1.25 line height
-  const hookY = safeTop + 12 + hookBlock / 2;                     // center of the card
+  let hookY = safeTop + 12 + hookBlock / 2;                       // center of the card
   const hookBottom = hookY + hookBlock / 2;
   const capFont = style.captions === 'subtitles' ? sub : style.captions === 'word' ? word : group;
   const underHook = Math.round(hookBottom + 36 + capFont * 0.7);  // first safe center under the card
@@ -40,13 +40,26 @@ export function captionLayout(lay, style) {
   } else capY = style.position === 'upper' ? underHook : style.position === 'middle' ? H / 2 : H - 170;
   // With a measured face, text moves off it: upper text stops above the forehead, lower text starts under the chin.
   const face = style.face;
+  let moved = false, hookShared = false;
   if (face && lay.fit === 'cover') {
     const faceTop = face.face_top_p10 * H, chin = face.chin_p90 * H;
-    if (style.position === 'lower' || style.position === 'middle') capY = Math.min(safeBottom - capFont * 0.7, Math.max(capY, chin + 20 + capFont * 0.7));
-    else capY = Math.min(capY, faceTop - 20 - capFont * 0.7);
-    if (capY - capFont * 0.7 < hookBottom + 10) capY = hookBottom + 10 + capFont * 0.7; // never under the card
+    // The brows: measured when the face data has the eye line, else a little over a third down the face box.
+    const eyes = (face.eyes_p10 ?? face.face_top_p10 + 0.36 * (face.chin_p90 - face.face_top_p10)) * H;
+    const under = chin + 20 + capFont * 0.7;                       // first center under the chin
+    let lower = style.position === 'lower' || style.position === 'middle';
+    if (lower) capY = Math.min(safeBottom - capFont * 0.7, Math.max(capY, under));
+    else {
+      capY = Math.min(capY, faceTop - 20 - capFont * 0.7);
+      if (capY - capFont * 0.7 < hookBottom + 10) capY = hookBottom + 10 + capFont * 0.7; // never under the card
+      // A close-up: the face fills the top of the frame and upper text would run across the eyes.
+      // An editor moves it under the chin when there is room there, rather than cover the face.
+      if (capY + capFont * 0.7 > eyes - 10 && under + capFont * 0.7 <= safeBottom) { capY = under; lower = true; moved = true; }
+    }
+    // The hook card cannot sit on the eyes either. Under the chin there is room for one thing at a
+    // time, so the card takes the captions' place for its few seconds and they start when it ends.
+    if (lower && hookBottom > eyes - 10) { hookY = Math.min(safeBottom - hookBlock / 2, Math.max(chin + 20 + hookBlock / 2, capY)); hookShared = true; }
   }
-  return { capX: W / 2, capY: Math.round(capY), hookX: W / 2, hookY: Math.round(hookY), hookBlock, word, group, sub, hook, safeTop, safeBottom, maxWidth: vertical ? 920 : 1600 };
+  return { capX: W / 2, capY: Math.round(capY), hookX: W / 2, hookY: Math.round(hookY), hookBlock, word, group, sub, hook, safeTop, safeBottom, maxWidth: vertical ? 920 : 1600, moved, hookShared };
 }
 
 export function buildAss(plan, lay, style) {
@@ -172,7 +185,7 @@ export function textBoxes(plan, lay, style) {
 
 // One FFmpeg pass: background (band layouts), footage, B-roll inserts, captions, mix.
 // Returns { out, encoder, seconds }.
-export function renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, hasAmf, lowMemory = false }) {
+export function renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, hasAmf, lowMemory = false, light = false }) {
   mkdirSync(join(dir, 'assets/fonts'), { recursive: true });
   for (const f of readdirSync(fontsDir)) if (f.endsWith('.ttf')) copyFileSync(join(fontsDir, f), join(dir, 'assets/fonts', f));
   writeFileSync(join(dir, 'assets/captions.ass'), buildAss(plan, lay, style));
@@ -183,7 +196,10 @@ export function renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, 
   // Punch-ins on the footage itself, before anything is laid over it (B-roll and text stay put).
   const zooms = plan.motion?.zooms || [];
   if (zooms.length) {
-    chain.push(...zoomFilter(zooms, F.w, F.h, zoomAnchor(lay.fit === 'cover' ? plan.face : null, style.position), D, base, '[punched]'));
+    // The zoom holds still the edge of the face nearest the text. On a close-up the text was moved
+    // under the chin, so it is the chin that must not move, whatever the style's position says.
+    const where = captionLayout(lay, style);
+    chain.push(...zoomFilter(zooms, F.w, F.h, zoomAnchor(lay.fit === 'cover' ? plan.face : null, where.moved || where.hookShared ? 'lower' : style.position), D, base, '[punched]'));
     base = '[punched]';
   }
   if (lay.fit !== 'cover') {
@@ -205,7 +221,10 @@ export function renderFast({ dir, plan, lay, style, out, quality, ff, fontsDir, 
   const amfFinal = hasAmf && ['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '20', '-qp_p', '20'];
   const x264Final = ['-c:v', 'libx264', '-preset', quality === 'high' ? 'slow' : 'medium', '-crf', quality === 'high' ? '17' : '19'];
   const x264Light = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '19', '-threads', '2'];
-  const ladder = draft
+  // light: a long video, or one upscaled from a small source. The GPU encoder is quick but its
+  // files are two to three times the size, and a ten-minute draft should not cost half a gigabyte.
+  const x264Small = ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', draft ? '25' : '22', '-threads', '2'];
+  const ladder = light ? [x264Small, amfFinal] : draft
     ? [hasAmf && ['-c:v', 'h264_amf', '-quality', 'speed', '-rc', 'cqp', '-qp_i', '24', '-qp_p', '24'], ['-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24']]
     // On an 8 GB machine the GPU encoder goes first: it uses almost no system memory and never refuses to start.
     : lowMemory ? [amfFinal, x264Light, x264Final] : [x264Final, x264Light, amfFinal];

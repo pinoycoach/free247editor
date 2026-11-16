@@ -124,8 +124,10 @@ export function parseCaptionScript(text, duration = Infinity, opts = {}) {
 // Center of the caption block, as a fraction of the height. Default: under the chin when the face
 // was measured, else lower-middle (60%), where a chest or a table usually is. Always inside the
 // band the platform leaves free: below the top 14%, above the bottom 20%.
-export function captionCenter(position, face, blockFrac = 0.12) {
-  const half = blockFrac / 2, lo = 0.14 + half, hi = 0.80 - half;
+// wide: a 16:9 frame has no app header or buttons over it, so text may sit from 5% to 95%
+// (the same band tools/check.mjs holds a horizontal video to).
+export function captionCenter(position, face, blockFrac = 0.12, wide = false) {
+  const half = blockFrac / 2, lo = (wide ? 0.05 : 0.14) + half, hi = (wide ? 0.95 : 0.80) - half;
   const clamp = (v) => Math.min(hi, Math.max(lo, v));
   if (typeof position === 'number') return clamp(position);
   if (position === 'upper') return clamp(face ? Math.min(0.24, face.face_top_p10 - 0.02 - half) : 0.24);

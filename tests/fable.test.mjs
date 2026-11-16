@@ -566,3 +566,40 @@ test('clips: stretches of a long talk that stand on their own', async () => {
   assert.ok(findClips(bare, { count: 3, min: 15, max: 60 }).length >= 1);
   assert.deepEqual(findClips([], {}), []);
 });
+
+test('voice care: the recording is measured and gets only what it needs', async () => {
+  const { voiceChain, levels } = await import('../tools/voice.mjs');
+  // A phone live in a noisy room: rumble, room noise 26 dB under the voice, a little muddy.
+  const live = voiceChain({ noise: -39.1, speech: -13, peak: -0.2, sub: -25.6, lowmid: -19.2, presence: -29.5, air: -29.3 });
+  assert.match(live.filter, /^highpass=f=80,highpass=f=95,/);                 // steeper rumble cut
+  assert.match(live.filter, /afftdn=nr=11:nf=-39:tn=1/);                       // noise down 11 dB, tracked
+  assert.match(live.filter, /equalizer=f=220:t=q:w=0\.9:g=-1\.8,equalizer=f=3000:t=q:w=1\.1:g=1\.8/);
+  assert.ok(!/deesser/.test(live.filter));                                     // a small lift needs no de-esser
+  // The leveller is told where the room sits, so it does not lift the pauses.
+  assert.match(live.filter, /speechnorm=e=4:c=2:t=0\.025:/);
+  assert.ok(live.filter.indexOf('afftdn') < live.filter.indexOf('speechnorm')); // clean first, then level
+  assert.equal(live.did.length, 4);
+  assert.match(live.did.join(' '), /room noise between words turned down by about 11 dB/);
+  // A clean studio take: nothing but the standard rumble filter and levelling.
+  const studio = voiceChain({ noise: -68, speech: -16, peak: -3, sub: -45, lowmid: -22, presence: -28, air: -33 });
+  assert.equal(studio.filter, 'highpass=f=80,acompressor=threshold=-22dB:ratio=2.5:attack=8:release=140:makeup=2,speechnorm=e=4:c=2:r=0.0005:l=1,alimiter=limit=0.95:level=0');
+  assert.deepEqual(studio.did, ['soft phrases lifted']);
+  // Very loud noise and very muddy sound are still treated gently: caps on every move.
+  const rough = voiceChain({ noise: -22, speech: -12, peak: 0, sub: -15, lowmid: -14, presence: -34, air: -40 });
+  assert.match(rough.filter, /afftdn=nr=12:nf=-30:/);
+  assert.match(rough.filter, /g=-4,equalizer=f=3000:t=q:w=1\.1:g=4,deesser=i=0\.25/);
+  assert.match(rough.filter, /t=0\.04:/);
+  // Not measured: the chain Fable always used.
+  assert.match(voiceChain(null).filter, /^highpass=f=80,acompressor/);
+  // Room and voice level from the sound itself: digital silence (an app's noise gate) is not the room.
+  const rate = 8000, sec = (n) => n * rate, s = new Int16Array(sec(20));
+  for (let i = 0; i < s.length; i++) {
+    const t = i / rate, phase = t % 2;                      // 1.2 s of speech, 0.5 s of room, 0.3 s gated to nothing
+    const amp = phase < 1.2 ? 8000 : phase < 1.7 ? 300 : 0;
+    s[i] = Math.round(amp * Math.sin(2 * Math.PI * 220 * t));
+  }
+  const lv = levels(s, rate);
+  assert.ok(lv.speech > -17 && lv.speech < -13, `speech ${lv.speech}`);
+  assert.ok(lv.noise > -46 && lv.noise < -40, `noise ${lv.noise}`);
+  assert.deepEqual(levels(new Int16Array(100), rate), { noise: -90, speech: -90 });
+});

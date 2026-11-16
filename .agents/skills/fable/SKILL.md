@@ -268,6 +268,10 @@ The song itself is never put into the video: the user adds it in the app, where 
 starting it with the video so the beats line up. Say that when you hand the draft over. If the
 reference track is a file the user gave you, use it only to find the beat.
 
+When the mouth has to match the song or a reference performer (a lip-sync trend, an AI lip-sync
+clip against its original, "the lips are off"), follow `.agents/skills/lip-sync/SKILL.md`: it
+measures the voice on a spectrogram and retimes the take with `tools/lipsync.py`.
+
 The built-in sound effects (tap, pop, click, ding, whoosh) are shaped tones made locally; files
 with those names in `my-sounds/` replace them.
 

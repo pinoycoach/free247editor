@@ -44,7 +44,8 @@ def build(cfg, tmp):
     ev = cfg['events']; cy = cfg.get('cy', 1330); P = cfg.get('pulse', 2.4)
     keep_audio = cfg.get('audio', 'sfx') == 'keep'
     inputs = ['-i', src]; fc = []
-    pre = f"scale=1620:2880:force_original_aspect_ratio=increase,crop=1620:2880,fps=30"
+    UW, UH = cfg.get("up", (1296, 2304))
+    pre = f"scale={UW}:{UH}:force_original_aspect_ratio=increase,crop={UW}:{UH},fps=30"
     if hold:
         pre += f",tpad=stop_mode=clone:stop_duration={hold}"
     fc.append(f"[0:v]{pre},zoompan=z='1+0.07*exp(-7*mod(on/30,{P}))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps=30,"

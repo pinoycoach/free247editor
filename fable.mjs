@@ -666,7 +666,7 @@ function buildFootage(dir, segments, lay, grade) {
   let lastError = null;
   for (const enc of ladder) {
     try {
-      ff(['-i', 'assets/raw.mp4', '-/filter_complex', script, '-map', '[out]', ...enc, '-r', String(FPS), '-movflags', '+faststart', 'assets/footage.mp4'], dir);
+      ff(['-i', 'assets/raw.mp4', '-filter_complex_script', script, '-map', '[out]', ...enc, '-r', String(FPS), '-movflags', '+faststart', 'assets/footage.mp4'], dir);
       const size = statSync(join(dir, 'assets/footage.mp4')).size;
       if (size < 10000) throw new Error(`footage came out empty (${size} bytes) with ${enc[1]}`);
       if (enc !== ladder[0]) log(`footage encoded with ${enc[1]} ${enc[3]} (the first choice could not start; the computer is low on memory)`);
@@ -684,7 +684,7 @@ function buildVoice(dir, segments, hasAudio, duration, style = {}) {
   const script = join(dir, 'assets/voice.filter');
   const level = style.voice === 'natural' ? '' : `,${VOICE_LEVEL}`;
   writeFileSync(script, a.join(';\n') + ';\n' + segments.map((_, i) => `[a${i}]`).join('') + `concat=n=${segments.length}:v=0:a=1${level},aresample=48000[voice]`);
-  ff(['-i', 'assets/raw.mp4', '-/filter_complex', script, '-map', '[voice]', '-ac', '2', '-ar', '48000', 'assets/voice.wav'], dir);
+  ff(['-i', 'assets/raw.mp4', '-filter_complex_script', script, '-map', '[voice]', '-ac', '2', '-ar', '48000', 'assets/voice.wav'], dir);
 }
 const SFX = {
   tap: 'sine=f=150:d=0.18,afade=t=out:d=0.17:curve=exp,volume=1.6',
@@ -742,7 +742,7 @@ function buildMix(dir, plan, style, duration) {
   f.push(`${mix.join('')}amix=inputs=${mix.length}:normalize=0:duration=longest,apad=whole_dur=${duration},atrim=end=${duration},loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000[m]`);
   const script = join(dir, 'assets/mix.filter');
   writeFileSync(script, f.join(';\n'));
-  ff([...inputs, '-/filter_complex', script, '-map', '[m]', '-ac', '2', '-ar', '48000', 'assets/mix.wav'], dir);
+  ff([...inputs, '-filter_complex_script', script, '-map', '[m]', '-ac', '2', '-ar', '48000', 'assets/mix.wav'], dir);
   return { cues, music: music ? basename(music) : null };
 }
 

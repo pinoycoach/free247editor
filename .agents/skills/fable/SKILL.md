@@ -158,6 +158,17 @@ outputs in the folder (`*_final.mp4`, `*-v2.mp4`). Look at `assets/review-shots.
 project to check order and placement. On approval, `--final`. A brief may ask for the video to
 be saved back to its folder; that is an upload, so ask first, then copy it there.
 
+**Commentary stitch** (a news clip plus a meme, "make a point in the caption", "use Cashie
+instead of the human"): the recipe is `fable/video-projects/coffee-tax-cashie/build.py` and
+`build2.py` (approved 2026-11-27 as kape-tax-short). The point lives in the captions (Taglish,
+emojis), written with `caption` on the joined video. Find the meme's human shots with ffmpeg
+`select='gt(scene,0.25)'`, check the borderline frames, and lay slow zooms of the user's pet
+photo over them (free; AI video only after a yes). Show the speaker for at most 4 s, on the line
+that says the thing; their full speech (an mp3 of the same clip) runs under the rest as the bed,
+the meme's music low under it. A 16:9 clip goes vertical over a blurred fill. The AI tag goes on
+the AI shots only, never on the pet. Cover: a pet frame (`post --cover-at`). Say once that news
+and meme footage may be muted or flagged.
+
 ## Motion: punch-ins, number callouts, step labels
 
 The style line "Graphics:" decides this, and the fast renderer draws it in the same pass as the

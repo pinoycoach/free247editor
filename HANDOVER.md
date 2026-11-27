@@ -4,6 +4,15 @@ The Claude Max account (claude-max-editor / claude-max-code) may end soon. From 
 claude-20 runs Fable too: video editing AND the posts / Higgsfield clips it already makes.
 Nothing in Fable is tied to an account. It is all in this folder on this laptop.
 
+## Since the handover (checked 2026-11-27)
+
+- Disk now has about 13 GB free (90%). Still check before each render.
+- New recipe: commentary stitch (news clip + meme, Cashie in place of the human). See the
+  fable skill, "Finished clips to join".
+- Cloud branch `claude/epic-sagan-bjx1gh` (pop-style editor, 2026-11-24) is NOT merged. Its
+  fable.mjs change breaks every edit on this laptop (ffmpeg 9), and `tools/pop.py` crashes on
+  text that starts after 0 s. Test any cloud branch on this laptop before merging.
+
 ## Start here
 
 1. Open this folder in the Claude desktop app, **Code tab**, signed in as claude-20:
